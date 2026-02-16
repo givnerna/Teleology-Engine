@@ -6,6 +6,7 @@
 use bevy_ecs::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::marker::PhantomData;
 use std::num::NonZeroU32;
 
 use crate::world::{NationId, ProvinceId, ScopeId};
@@ -141,11 +142,64 @@ pub struct TreeProgressState {
     pub progress: HashMap<u32, f64>,      // node_raw -> accumulated
 }
 
-/// Progress state scoped to nations and provinces (expandable).
+/// Generic progress state indexed by any ScopeId (ProvinceId, NationId, etc.).
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub struct ScopedProgress<Id: ScopeId> {
+    pub per_scope: Vec<HashMap<u32, TreeProgressState>>,
+    #[serde(skip)]
+    _marker: PhantomData<Id>,
+}
+
+impl<Id: ScopeId> ScopedProgress<Id> {
+    pub fn new(count: usize) -> Self {
+        Self {
+            per_scope: vec![HashMap::new(); count],
+            _marker: PhantomData,
+        }
+    }
+
+    pub fn is_unlocked(&self, id: Id, tree: TreeId, node: NodeId) -> bool {
+        self.per_scope
+            .get(id.index())
+            .and_then(|m| m.get(&tree.raw()))
+            .map(|s| s.unlocked.contains(&node.raw()))
+            .unwrap_or(false)
+    }
+
+    pub fn unlock(&mut self, id: Id, tree: TreeId, node: NodeId) {
+        if let Some(m) = self.per_scope.get_mut(id.index()) {
+            let state = m.entry(tree.raw()).or_default();
+            state.unlocked.insert(node.raw());
+            state.progress.remove(&node.raw());
+        }
+    }
+
+    pub fn add_progress(&mut self, id: Id, tree: TreeId, node: NodeId, amount: f64) {
+        if let Some(m) = self.per_scope.get_mut(id.index()) {
+            let state = m.entry(tree.raw()).or_default();
+            *state.progress.entry(node.raw()).or_insert(0.0) += amount.max(0.0);
+        }
+    }
+}
+
+/// Progress for nations. Type alias for backwards compatibility.
+pub type NationProgress = ScopedProgress<NationId>;
+
+/// Progress for provinces. Type alias for backwards compatibility.
+pub type ProvinceProgress = ScopedProgress<ProvinceId>;
+
+// Resource impls for concrete types (Bevy requires Resource on concrete, not generic).
+impl Resource for ScopedProgress<NationId> {}
+impl Resource for ScopedProgress<ProvinceId> {}
+
+/// Progress state scoped to nations and provinces (backwards-compatible wrapper).
+///
+/// New code should use `ScopedProgress<NationId>` and `ScopedProgress<ProvinceId>` directly
+/// as separate Bevy resources. This struct is provided for migration convenience.
 #[derive(Resource, Clone, Default, Serialize, Deserialize)]
 pub struct ProgressState {
-    pub per_nation: Vec<HashMap<u32, TreeProgressState>>,   // nation_index -> (tree_raw -> state)
-    pub per_province: Vec<HashMap<u32, TreeProgressState>>, // province_index -> (tree_raw -> state)
+    pub per_nation: Vec<HashMap<u32, TreeProgressState>>,
+    pub per_province: Vec<HashMap<u32, TreeProgressState>>,
 }
 
 impl ProgressState {

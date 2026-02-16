@@ -169,11 +169,20 @@ impl TagRegistry {
 }
 
 /// Generic tags indexed by any ScopeId: (scope_id, tag_type) -> tag_value.
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ScopedTags<Id: ScopeId> {
     pub tags: HashMap<(Id, TagTypeId), TagId>,
     #[serde(skip)]
     _marker: PhantomData<Id>,
+}
+
+impl<Id: ScopeId> Default for ScopedTags<Id> {
+    fn default() -> Self {
+        Self {
+            tags: HashMap::new(),
+            _marker: PhantomData,
+        }
+    }
 }
 
 impl<Id: ScopeId> ScopedTags<Id> {

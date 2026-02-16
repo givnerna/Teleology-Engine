@@ -549,6 +549,47 @@ pub fn add_province_to_world(world: &mut World) -> Option<u32> {
 /// Convenience type for the full game world (ECS + resources).
 pub type GameWorld = World;
 
+/// Macro to register a custom scope id type, generating `ScopeId` impl and `Resource` impls
+/// for `ScopedModifiers<T>`, `ScopedTags<T>`, and `ScopedProgress<T>`.
+///
+/// Usage:
+/// ```ignore
+/// // Define your id type (must be a newtype over NonZeroU32).
+/// #[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// pub struct CityId(pub NonZeroU32);
+///
+/// // Register it as a scope — generates ScopeId impl + Resource impls for all generic scope types.
+/// teleology_core::register_scope!(CityId);
+///
+/// // Now you can use:
+/// //   ScopedModifiers<CityId> as a Bevy Resource
+/// //   ScopedTags<CityId> as a Bevy Resource
+/// //   ScopedProgress<CityId> as a Bevy Resource
+/// ```
+#[macro_export]
+macro_rules! register_scope {
+    ($id_type:ty) => {
+        impl $crate::world::ScopeId for $id_type {
+            #[inline]
+            fn index(self) -> usize {
+                (self.0.get() - 1) as usize
+            }
+            #[inline]
+            fn raw(self) -> u32 {
+                self.0.get()
+            }
+            #[inline]
+            fn from_raw(raw: u32) -> Self {
+                Self(::std::num::NonZeroU32::new(raw).unwrap())
+            }
+        }
+
+        impl bevy_ecs::prelude::Resource for $crate::modifiers::ScopedModifiers<$id_type> {}
+        impl bevy_ecs::prelude::Resource for $crate::tags::ScopedTags<$id_type> {}
+        impl bevy_ecs::prelude::Resource for $crate::progress_trees::ScopedProgress<$id_type> {}
+    };
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -18,15 +18,71 @@ impl EventTopicId {
     }
 }
 
-/// Optional scope for routing/filtering.
-#[derive(Clone, Copy, Serialize, Deserialize)]
-pub enum EventScopeRef {
-    Global,
-    NationRaw(u32),
-    ProvinceRaw(u32),
-    CharacterRaw(u64),
-    ArmyRaw(u32),
+/// Well-known scope type constants for `EntityScopeRef`.
+pub mod scope_types {
+    /// Global scope (no entity).
+    pub const GLOBAL: u32 = 0;
+    /// Province scope (raw = province raw id).
+    pub const PROVINCE: u32 = 1;
+    /// Nation scope (raw = nation raw id).
+    pub const NATION: u32 = 2;
+    /// Character scope (raw = character raw id as u64 packed into two u32s via `raw`+`raw_hi`).
+    pub const CHARACTER: u32 = 3;
+    /// Army scope (raw = army raw id).
+    pub const ARMY: u32 = 4;
 }
+
+/// Extensible scope for routing/filtering. Replaces the old fixed `EventScopeRef` enum.
+///
+/// Well-known scope types use constants from [`scope_types`]. Custom game scopes can use
+/// values >= 1000 (by convention) to avoid conflicts with future engine-defined types.
+#[derive(Clone, Copy, Serialize, Deserialize)]
+pub struct EntityScopeRef {
+    /// Scope type discriminant (see [`scope_types`] for well-known values).
+    pub scope_type: u32,
+    /// Primary raw entity id within this scope (meaning depends on scope_type).
+    pub raw: u32,
+    /// Secondary raw id (used for 64-bit ids like characters: high 32 bits).
+    pub raw_hi: u32,
+}
+
+impl EntityScopeRef {
+    pub const fn global() -> Self {
+        Self { scope_type: scope_types::GLOBAL, raw: 0, raw_hi: 0 }
+    }
+
+    pub const fn nation(raw: u32) -> Self {
+        Self { scope_type: scope_types::NATION, raw, raw_hi: 0 }
+    }
+
+    pub const fn province(raw: u32) -> Self {
+        Self { scope_type: scope_types::PROVINCE, raw, raw_hi: 0 }
+    }
+
+    pub const fn character(raw: u64) -> Self {
+        Self {
+            scope_type: scope_types::CHARACTER,
+            raw: raw as u32,
+            raw_hi: (raw >> 32) as u32,
+        }
+    }
+
+    pub const fn army(raw: u32) -> Self {
+        Self { scope_type: scope_types::ARMY, raw, raw_hi: 0 }
+    }
+
+    /// Custom scope with a game-defined type discriminant.
+    pub const fn custom(scope_type: u32, raw: u32) -> Self {
+        Self { scope_type, raw, raw_hi: 0 }
+    }
+
+    pub fn is_global(&self) -> bool {
+        self.scope_type == scope_types::GLOBAL
+    }
+}
+
+/// Backwards-compatible alias. Prefer `EntityScopeRef` in new code.
+pub type EventScopeRef = EntityScopeRef;
 
 /// Opaque payload.
 #[derive(Clone, Serialize, Deserialize)]
@@ -39,7 +95,7 @@ pub struct EventPayload {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct EventEnvelope {
     pub topic: EventTopicId,
-    pub scope: EventScopeRef,
+    pub scope: EntityScopeRef,
     pub payload: EventPayload,
     /// Game-defined timestamp for ordering (optional; 0 if unused).
     pub timestamp: i64,
@@ -115,7 +171,7 @@ impl EventBus {
 pub fn publish_event(
     world: &mut World,
     topic: &str,
-    scope: EventScopeRef,
+    scope: EntityScopeRef,
     payload_type_id: u32,
     bytes: Vec<u8>,
     timestamp: i64,
@@ -132,4 +188,3 @@ pub fn publish_event(
         timestamp,
     });
 }
-

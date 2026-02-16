@@ -1745,7 +1745,7 @@ impl EditorApp {
                                     )
                                     .on_hover_text(format!(
                                         "Owner: {}  Dev: {}/{}/{}",
-                                        if owner_raw == 0 { "—" } else { &owner_raw.to_string() },
+                                        if owner_raw == 0 { "—".to_string() } else { owner_raw.to_string() },
                                         p.development[0],
                                         p.development[1],
                                         p.development[2],
@@ -1992,7 +1992,7 @@ impl EditorApp {
                             },
                         ],
                     });
-                    queue_event(world, id, teleology_core::EventScope::Global, Vec::new());
+                    queue_event(world, id, teleology_core::EventScope::global(), Vec::new());
                 }
             });
 
@@ -2011,7 +2011,7 @@ impl EditorApp {
                         teleology_core::publish_event(
                             world,
                             self.event_topic_input.trim(),
-                            teleology_core::EventScopeRef::Global,
+                            teleology_core::EventScopeRef::global(),
                             1,
                             self.event_payload_input.as_bytes().to_vec(),
                             0,
