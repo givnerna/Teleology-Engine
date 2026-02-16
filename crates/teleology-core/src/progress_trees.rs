@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU32;
 
-use crate::world::{NationId, ProvinceId};
+use crate::world::{NationId, ProvinceId, ScopeId};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TreeId(pub NonZeroU32);
@@ -156,52 +156,76 @@ impl ProgressState {
         }
     }
 
-    fn nation_state_mut(&mut self, nation: NationId, tree: TreeId) -> &mut TreeProgressState {
-        self.per_nation[nation.index()]
-            .entry(tree.raw())
-            .or_default()
+    // --- Generic scope accessors ---
+
+    /// Get the per-scope storage for a given ScopeId type.
+    fn scope_storage<Id: ScopeId>(&self) -> &Vec<HashMap<u32, TreeProgressState>> {
+        if std::any::TypeId::of::<Id>() == std::any::TypeId::of::<NationId>() {
+            &self.per_nation
+        } else {
+            &self.per_province
+        }
     }
 
-    fn province_state_mut(&mut self, province: ProvinceId, tree: TreeId) -> &mut TreeProgressState {
-        self.per_province[province.index()]
-            .entry(tree.raw())
-            .or_default()
+    fn scope_storage_mut<Id: ScopeId>(&mut self) -> &mut Vec<HashMap<u32, TreeProgressState>> {
+        if std::any::TypeId::of::<Id>() == std::any::TypeId::of::<NationId>() {
+            &mut self.per_nation
+        } else {
+            &mut self.per_province
+        }
     }
 
-    pub fn is_unlocked_nation(&self, nation: NationId, tree: TreeId, node: NodeId) -> bool {
-        self.per_nation
-            .get(nation.index())
+    /// Check if a node is unlocked for any scope id.
+    pub fn is_unlocked<Id: ScopeId>(&self, id: Id, tree: TreeId, node: NodeId) -> bool {
+        self.scope_storage::<Id>()
+            .get(id.index())
             .and_then(|m| m.get(&tree.raw()))
             .map(|s| s.unlocked.contains(&node.raw()))
             .unwrap_or(false)
+    }
+
+    /// Unlock a node for any scope id.
+    pub fn unlock<Id: ScopeId>(&mut self, id: Id, tree: TreeId, node: NodeId) {
+        let storage = self.scope_storage_mut::<Id>();
+        let state = storage[id.index()]
+            .entry(tree.raw())
+            .or_default();
+        state.unlocked.insert(node.raw());
+        state.progress.remove(&node.raw());
+    }
+
+    /// Add progress toward a node for any scope id.
+    pub fn add_progress<Id: ScopeId>(&mut self, id: Id, tree: TreeId, node: NodeId, amount: f64) {
+        let storage = self.scope_storage_mut::<Id>();
+        let state = storage[id.index()]
+            .entry(tree.raw())
+            .or_default();
+        *state.progress.entry(node.raw()).or_insert(0.0) += amount.max(0.0);
+    }
+
+    // --- Convenience methods for backwards compatibility ---
+
+    pub fn is_unlocked_nation(&self, nation: NationId, tree: TreeId, node: NodeId) -> bool {
+        self.is_unlocked::<NationId>(nation, tree, node)
     }
 
     pub fn unlock_nation(&mut self, nation: NationId, tree: TreeId, node: NodeId) {
-        self.nation_state_mut(nation, tree).unlocked.insert(node.raw());
-        self.nation_state_mut(nation, tree).progress.remove(&node.raw());
+        self.unlock::<NationId>(nation, tree, node);
     }
 
     pub fn add_progress_nation(&mut self, nation: NationId, tree: TreeId, node: NodeId, amount: f64) {
-        let s = self.nation_state_mut(nation, tree);
-        *s.progress.entry(node.raw()).or_insert(0.0) += amount.max(0.0);
+        self.add_progress::<NationId>(nation, tree, node, amount);
     }
 
     pub fn is_unlocked_province(&self, province: ProvinceId, tree: TreeId, node: NodeId) -> bool {
-        self.per_province
-            .get(province.index())
-            .and_then(|m| m.get(&tree.raw()))
-            .map(|s| s.unlocked.contains(&node.raw()))
-            .unwrap_or(false)
+        self.is_unlocked::<ProvinceId>(province, tree, node)
     }
 
     pub fn unlock_province(&mut self, province: ProvinceId, tree: TreeId, node: NodeId) {
-        self.province_state_mut(province, tree).unlocked.insert(node.raw());
-        self.province_state_mut(province, tree).progress.remove(&node.raw());
+        self.unlock::<ProvinceId>(province, tree, node);
     }
 
     pub fn add_progress_province(&mut self, province: ProvinceId, tree: TreeId, node: NodeId, amount: f64) {
-        let s = self.province_state_mut(province, tree);
-        *s.progress.entry(node.raw()).or_insert(0.0) += amount.max(0.0);
+        self.add_progress::<ProvinceId>(province, tree, node, amount);
     }
 }
-

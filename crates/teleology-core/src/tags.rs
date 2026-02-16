@@ -6,9 +6,10 @@
 //! - Serializable: stored in MapFile so maps/scenarios can be shared.
 
 use bevy_ecs::prelude::Resource;
-use crate::world::{NationId, ProvinceId};
+use crate::world::{NationId, ProvinceId, ScopeId};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::marker::PhantomData;
 use std::num::NonZeroU32;
 
 /// Stable id for a tag type/category (e.g. religion, culture, ideology, custom).
@@ -167,43 +168,34 @@ impl TagRegistry {
     }
 }
 
-/// Tags assigned to provinces: (province, tag_type) -> tag_value.
-#[derive(Resource, Clone, Default, Serialize, Deserialize)]
-pub struct ProvinceTags {
-    pub tags: HashMap<(ProvinceId, TagTypeId), TagId>,
+/// Generic tags indexed by any ScopeId: (scope_id, tag_type) -> tag_value.
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub struct ScopedTags<Id: ScopeId> {
+    pub tags: HashMap<(Id, TagTypeId), TagId>,
+    #[serde(skip)]
+    _marker: PhantomData<Id>,
 }
 
-impl ProvinceTags {
-    pub fn get(&self, province: ProvinceId, ty: TagTypeId) -> Option<TagId> {
-        self.tags.get(&(province, ty)).copied()
+impl<Id: ScopeId> ScopedTags<Id> {
+    pub fn get(&self, id: Id, ty: TagTypeId) -> Option<TagId> {
+        self.tags.get(&(id, ty)).copied()
     }
 
-    pub fn set(&mut self, province: ProvinceId, ty: TagTypeId, tag: TagId) {
-        self.tags.insert((province, ty), tag);
+    pub fn set(&mut self, id: Id, ty: TagTypeId, tag: TagId) {
+        self.tags.insert((id, ty), tag);
     }
 
-    pub fn clear(&mut self, province: ProvinceId, ty: TagTypeId) {
-        self.tags.remove(&(province, ty));
-    }
-}
-
-/// Tags assigned to nations: (nation, tag_type) -> tag_value.
-#[derive(Resource, Clone, Default, Serialize, Deserialize)]
-pub struct NationTags {
-    pub tags: HashMap<(NationId, TagTypeId), TagId>,
-}
-
-impl NationTags {
-    pub fn get(&self, nation: NationId, ty: TagTypeId) -> Option<TagId> {
-        self.tags.get(&(nation, ty)).copied()
-    }
-
-    pub fn set(&mut self, nation: NationId, ty: TagTypeId, tag: TagId) {
-        self.tags.insert((nation, ty), tag);
-    }
-
-    pub fn clear(&mut self, nation: NationId, ty: TagTypeId) {
-        self.tags.remove(&(nation, ty));
+    pub fn clear(&mut self, id: Id, ty: TagTypeId) {
+        self.tags.remove(&(id, ty));
     }
 }
 
+/// Tags assigned to provinces. Type alias for backwards compatibility.
+pub type ProvinceTags = ScopedTags<ProvinceId>;
+
+/// Tags assigned to nations. Type alias for backwards compatibility.
+pub type NationTags = ScopedTags<NationId>;
+
+// Resource impls for the two concrete types.
+impl Resource for ScopedTags<ProvinceId> {}
+impl Resource for ScopedTags<NationId> {}
