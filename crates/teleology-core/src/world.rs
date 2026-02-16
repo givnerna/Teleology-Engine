@@ -1,0 +1,588 @@
+//! Game world: ECS World + SoA-style bulk data for grand strategy.
+//!
+//! Provinces and nations use dense, cache-friendly storage so we can
+//! iterate over thousands of entities without pointer chasing.
+
+use bevy_ecs::prelude::*;
+use serde::{Deserialize, Serialize};
+use std::num::NonZeroU32;
+
+use crate::archetypes::{Nation, Province};
+
+/// Stable id for a province (map slot). Dense index into province arrays.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ProvinceId(pub NonZeroU32);
+
+impl ProvinceId {
+    #[inline]
+    pub fn index(self) -> usize {
+        (self.0.get() - 1) as usize
+    }
+}
+
+/// Stable id for a nation/tag.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct NationId(pub NonZeroU32);
+
+impl NationId {
+    #[inline]
+    pub fn index(self) -> usize {
+        (self.0.get() - 1) as usize
+    }
+}
+
+/// Entity handle for units (can be many; use ECS or secondary SoA).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct UnitId(pub u64);
+
+/// Total counts fixed at world init (grand strategy: province count is static).
+#[derive(Resource, Clone, Serialize, Deserialize)]
+pub struct WorldBounds {
+    pub province_count: u32,
+    pub nation_count: u32,
+}
+
+/// 2D map layout for the editor: each tile (x, y) has a province index (1-based; 0 = no province).
+#[derive(Resource, Clone, Serialize, Deserialize)]
+pub struct MapLayout {
+    pub width: u32,
+    pub height: u32,
+    /// Index = y * width + x; value = province raw id (0 = empty).
+    pub tiles: Vec<u32>,
+}
+
+impl MapLayout {
+    pub fn new(width: u32, height: u32) -> Self {
+        let len = (width as usize).saturating_mul(height as usize);
+        Self {
+            width,
+            height,
+            tiles: vec![0; len],
+        }
+    }
+
+    #[inline]
+    pub fn index(&self, x: u32, y: u32) -> usize {
+        (y as usize) * (self.width as usize) + (x as usize)
+    }
+
+    pub fn get(&self, x: u32, y: u32) -> u32 {
+        let i = self.index(x, y);
+        self.tiles.get(i).copied().unwrap_or(0)
+    }
+
+    pub fn set(&mut self, x: u32, y: u32, province_raw: u32) {
+        let i = self.index(x, y);
+        if i < self.tiles.len() {
+            self.tiles[i] = province_raw;
+        }
+    }
+
+    pub fn tile_count(&self) -> usize {
+        self.tiles.len()
+    }
+}
+
+/// Hex grid layout: axial coordinates (q, r). Index = r * width + q; value = province raw id (0 = empty).
+#[derive(Resource, Clone, Serialize, Deserialize)]
+pub struct HexMapLayout {
+    pub width: u32,
+    pub height: u32,
+    /// Index = r * width + q; value = province raw id (0 = empty).
+    pub tiles: Vec<u32>,
+}
+
+impl HexMapLayout {
+    pub fn new(width: u32, height: u32) -> Self {
+        let len = (width as usize).saturating_mul(height as usize);
+        Self {
+            width,
+            height,
+            tiles: vec![0; len],
+        }
+    }
+
+    #[inline]
+    pub fn index(&self, q: u32, r: u32) -> usize {
+        (r as usize) * (self.width as usize) + (q as usize)
+    }
+
+    pub fn get(&self, q: u32, r: u32) -> u32 {
+        let i = self.index(q, r);
+        self.tiles.get(i).copied().unwrap_or(0)
+    }
+
+    pub fn set(&mut self, q: u32, r: u32, province_raw: u32) {
+        let i = self.index(q, r);
+        if i < self.tiles.len() {
+            self.tiles[i] = province_raw;
+        }
+    }
+
+    pub fn hex_count(&self) -> usize {
+        self.tiles.len()
+    }
+
+    /// Six axial neighbors: (q+1,r), (q+1,r-1), (q,r-1), (q-1,r), (q-1,r+1), (q,r+1).
+    pub fn neighbors(&self, q: u32, r: u32) -> [(u32, u32); 6] {
+        [
+            (q + 1, r),
+            (q + 1, r.saturating_sub(1)),
+            (q, r.saturating_sub(1)),
+            (q.saturating_sub(1), r),
+            (q.saturating_sub(1), r + 1),
+            (q, r + 1),
+        ]
+    }
+}
+
+/// One province as a closed polygon (vertices in order; first and last implicitly connected).
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ProvincePolygon {
+    pub province_id: u32,
+    /// Vertices in world coordinates (e.g. longitude/latitude or arbitrary 2D).
+    pub vertices: Vec<[f64; 2]>,
+}
+
+/// Irregular, vector-based map: provinces as polygons. No grid; adjacency from shared edges.
+#[derive(Resource, Clone, Default, Serialize, Deserialize)]
+pub struct VectorMapLayout {
+    pub polygons: Vec<ProvincePolygon>,
+}
+
+impl VectorMapLayout {
+    pub fn new() -> Self {
+        Self {
+            polygons: Vec::new(),
+        }
+    }
+
+    pub fn add(&mut self, province_id: u32, vertices: Vec<[f64; 2]>) {
+        if province_id != 0 && !vertices.is_empty() {
+            self.polygons.push(ProvincePolygon {
+                province_id,
+                vertices,
+            });
+        }
+    }
+}
+
+/// Map layout kind: square grid, hex grid, or irregular vector provinces.
+#[derive(Resource, Clone, Serialize, Deserialize)]
+pub enum MapKind {
+    Square(MapLayout),
+    Hex(HexMapLayout),
+    Irregular(VectorMapLayout),
+}
+
+impl MapKind {
+    pub fn square(width: u32, height: u32) -> Self {
+        MapKind::Square(MapLayout::new(width, height))
+    }
+
+    pub fn hex(width: u32, height: u32) -> Self {
+        MapKind::Hex(HexMapLayout::new(width, height))
+    }
+
+    pub fn irregular() -> Self {
+        MapKind::Irregular(VectorMapLayout::new())
+    }
+}
+
+/// Province adjacency (Paradox-style): for each province index, list of adjacent province ids.
+/// Used for movement, borders, and pathfinding.
+#[derive(Resource, Clone, Default, Serialize, Deserialize)]
+pub struct ProvinceAdjacency {
+    /// adjacent[i] = list of ProvinceId (raw) that border province index i (0-based).
+    pub adjacent: Vec<Vec<u32>>,
+}
+
+impl ProvinceAdjacency {
+    pub fn new(province_count: usize) -> Self {
+        Self {
+            adjacent: vec![Vec::new(); province_count],
+        }
+    }
+
+    #[inline]
+    pub fn get(&self, id: ProvinceId) -> &[u32] {
+        self.adjacent
+            .get(id.index())
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    pub fn set(&mut self, id: ProvinceId, neighbors: Vec<u32>) {
+        if id.index() < self.adjacent.len() {
+            self.adjacent[id.index()] = neighbors;
+        }
+    }
+
+    pub fn add_neighbor(&mut self, id: ProvinceId, neighbor_raw: u32) {
+        if neighbor_raw == 0 {
+            return;
+        }
+        if id.index() < self.adjacent.len() {
+            let v = &mut self.adjacent[id.index()];
+            if !v.contains(&neighbor_raw) {
+                v.push(neighbor_raw);
+            }
+        }
+    }
+}
+
+/// Bulk province data — struct-of-arrays style for one component.
+/// In a full implementation each field would be a `Vec<T>`; here we use
+/// a single struct per province for clarity; you can split into SoA later.
+#[derive(Resource, Clone, Serialize, Deserialize)]
+pub struct ProvinceStore {
+    pub provinces: Vec<Province>,
+}
+
+impl ProvinceStore {
+    #[inline]
+    pub fn get(&self, id: ProvinceId) -> Option<&Province> {
+        self.provinces.get(id.index())
+    }
+
+    #[inline]
+    pub fn get_mut(&mut self, id: ProvinceId) -> Option<&mut Province> {
+        self.provinces.get_mut(id.index())
+    }
+
+    #[inline]
+    pub fn iter(&self) -> impl Iterator<Item = (ProvinceId, &Province)> {
+        self.provinces.iter().enumerate().map(|(i, p)| {
+            (ProvinceId(NonZeroU32::new((i + 1) as u32).unwrap()), p)
+        })
+    }
+}
+
+/// Bulk nation data.
+#[derive(Resource, Clone, Serialize, Deserialize)]
+pub struct NationStore {
+    pub nations: Vec<Nation>,
+}
+
+impl NationStore {
+    #[inline]
+    pub fn get(&self, id: NationId) -> Option<&Nation> {
+        self.nations.get(id.index())
+    }
+
+    #[inline]
+    pub fn get_mut(&mut self, id: NationId) -> Option<&mut Nation> {
+        self.nations.get_mut(id.index())
+    }
+}
+
+/// Current game date (grand strategy: day/month/year).
+#[derive(Resource, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct GameDate {
+    pub day: u16,
+    pub month: u8,
+    pub year: i32,
+}
+
+impl Default for GameDate {
+    fn default() -> Self {
+        Self { day: 1, month: 1, year: 1444 }
+    }
+}
+
+impl GameDate {
+    pub fn new(year: i32, month: u8, day: u16) -> Self {
+        Self { day, month, year }
+    }
+
+    /// Total days since epoch for ordering and delta math.
+    #[inline]
+    pub fn to_days_since_epoch(self) -> i64 {
+        let y = self.year as i64;
+        let m = self.month as i64;
+        let d = self.day as i64;
+        (y * 365) + (m * 31) + d
+    }
+}
+
+/// Builder for a new game world (province count, nations, etc.).
+pub struct WorldBuilder {
+    province_count: u32,
+    nation_count: u32,
+    map_kind: Option<MapKind>,
+    enable_tags: bool,
+    enable_character_gen: bool,
+    enable_modifiers: bool,
+    enable_events: bool,
+    enable_event_bus: bool,
+    enable_progress_trees: bool,
+    enable_armies: bool,
+}
+
+impl WorldBuilder {
+    pub fn new() -> Self {
+        Self {
+            province_count: 0,
+            nation_count: 0,
+            map_kind: None,
+            enable_tags: false,
+            enable_character_gen: false,
+            enable_modifiers: false,
+            enable_events: false,
+            enable_event_bus: false,
+            enable_progress_trees: false,
+            enable_armies: false,
+        }
+    }
+
+    pub fn provinces(mut self, n: u32) -> Self {
+        self.province_count = n;
+        self
+    }
+
+    pub fn nations(mut self, n: u32) -> Self {
+        self.nation_count = n;
+        self
+    }
+
+    /// Square grid map (pre-filled with cycling province ids).
+    pub fn map_size(mut self, width: u32, height: u32) -> Self {
+        let mut map = MapLayout::new(width, height);
+        let n = self.province_count as usize;
+        for i in 0..map.tiles.len() {
+            map.tiles[i] = ((i % n) as u32) + 1;
+        }
+        self.map_kind = Some(MapKind::Square(map));
+        self
+    }
+
+    /// Square grid map with all tiles empty (0). Use this to draw provinces on the map first, then assign nations.
+    pub fn map_size_empty(mut self, width: u32, height: u32) -> Self {
+        self.map_kind = Some(MapKind::Square(MapLayout::new(width, height)));
+        self
+    }
+
+    /// Hex grid map (axial q,r; pre-filled with cycling province ids).
+    pub fn map_hex(mut self, width: u32, height: u32) -> Self {
+        let mut hex = HexMapLayout::new(width, height);
+        let n = self.province_count as usize;
+        for i in 0..hex.tiles.len() {
+            hex.tiles[i] = ((i % n) as u32) + 1;
+        }
+        self.map_kind = Some(MapKind::Hex(hex));
+        self
+    }
+
+    /// Hex grid map with all tiles empty (0). Use this to draw provinces on the map first, then assign nations.
+    pub fn map_hex_empty(mut self, width: u32, height: u32) -> Self {
+        self.map_kind = Some(MapKind::Hex(HexMapLayout::new(width, height)));
+        self
+    }
+
+    /// Irregular vector map (empty; load from file or add polygons in editor).
+    pub fn map_irregular(mut self) -> Self {
+        self.map_kind = Some(MapKind::Irregular(VectorMapLayout::new()));
+        self
+    }
+
+    /// Enable the tag system (TagRegistry + per-province/per-nation tag maps).
+    pub fn with_tags(mut self) -> Self {
+        self.enable_tags = true;
+        self
+    }
+
+    /// Enable built-in character generator config (CharacterGenConfig resource).
+    pub fn with_character_generator(mut self) -> Self {
+        self.enable_character_gen = true;
+        self
+    }
+
+    /// Enable modifiers (ProvinceModifiers + NationModifiers resources).
+    pub fn with_modifiers(mut self) -> Self {
+        self.enable_modifiers = true;
+        self
+    }
+
+    /// Enable pop-up events (EventRegistry + EventQueue + ActiveEvent resources).
+    pub fn with_events(mut self) -> Self {
+        self.enable_events = true;
+        self
+    }
+
+    /// Enable the EventBus (publish/poll dev-facing messaging).
+    pub fn with_event_bus(mut self) -> Self {
+        self.enable_event_bus = true;
+        self
+    }
+
+    /// Enable progress trees (definitions + per-scope ProgressState).
+    pub fn with_progress_trees(mut self) -> Self {
+        self.enable_progress_trees = true;
+        self
+    }
+
+    /// Enable the army system (ArmyRegistry resource).
+    pub fn with_armies(mut self) -> Self {
+        self.enable_armies = true;
+        self
+    }
+
+    pub fn build(self, world: &mut World) {
+        world.insert_resource(WorldBounds {
+            province_count: self.province_count,
+            nation_count: self.nation_count,
+        });
+        world.insert_resource(GameDate::default());
+        world.insert_resource(ProvinceStore {
+            provinces: (0..self.province_count)
+                .map(|i| Province::default_for(ProvinceId(NonZeroU32::new(i + 1).unwrap())))
+                .collect(),
+        });
+        world.insert_resource(NationStore {
+            nations: (0..self.nation_count)
+                .map(|i| Nation::default_for(NationId(NonZeroU32::new(i + 1).unwrap())))
+                .collect(),
+        });
+        if let Some(mk) = self.map_kind {
+            world.insert_resource(mk);
+        }
+        world.insert_resource(ProvinceAdjacency::new(self.province_count as usize));
+
+        // Optional, modular systems.
+        if self.enable_tags {
+            world.insert_resource(crate::tags::TagRegistry::new());
+            world.insert_resource(crate::tags::ProvinceTags::default());
+            world.insert_resource(crate::tags::NationTags::default());
+        }
+        if self.enable_character_gen {
+            world.insert_resource(crate::character_gen::CharacterGenConfig::default());
+        }
+        if self.enable_modifiers {
+            world.insert_resource(crate::modifiers::ProvinceModifiers::new(
+                self.province_count as usize,
+            ));
+            world.insert_resource(crate::modifiers::NationModifiers::new(
+                self.nation_count as usize,
+            ));
+        }
+        if self.enable_events {
+            world.insert_resource(crate::events::EventRegistry::new());
+            world.insert_resource(crate::events::EventQueue::default());
+            world.insert_resource(crate::events::ActiveEvent::default());
+        }
+        if self.enable_event_bus {
+            world.insert_resource(crate::event_bus::EventBus::new());
+        }
+        if self.enable_progress_trees {
+            world.insert_resource(crate::progress_trees::ProgressTrees::new());
+            world.insert_resource(crate::progress_trees::ProgressState::new(
+                self.nation_count as usize,
+                self.province_count as usize,
+            ));
+        }
+        if self.enable_armies {
+            world.insert_resource(crate::armies::ArmyRegistry::new());
+        }
+    }
+}
+
+impl Default for WorldBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Add one new province to an existing world (e.g. from the map editor).
+/// Extends WorldBounds, ProvinceStore, ProvinceAdjacency, and optionally ProvinceModifiers and ProgressState.
+/// Returns the new province raw id (1-based).
+pub fn add_province_to_world(world: &mut World) -> Option<u32> {
+    let mut bounds = world.get_resource_mut::<WorldBounds>()?;
+    let new_raw = bounds.province_count + 1;
+    bounds.province_count = new_raw;
+
+    let mut store = world.get_resource_mut::<ProvinceStore>()?;
+    store.provinces.push(Province::default_for(ProvinceId(
+        NonZeroU32::new(new_raw).unwrap(),
+    )));
+
+    if let Some(mut adj) = world.get_resource_mut::<ProvinceAdjacency>() {
+        adj.adjacent.push(Vec::new());
+    }
+    if let Some(mut pm) = world.get_resource_mut::<crate::modifiers::ProvinceModifiers>() {
+        pm.per_province.push(Vec::new());
+    }
+    if let Some(mut ps) = world.get_resource_mut::<crate::progress_trees::ProgressState>() {
+        ps.per_province.push(std::collections::HashMap::new());
+    }
+
+    Some(new_raw)
+}
+
+/// Convenience type for the full game world (ECS + resources).
+pub type GameWorld = World;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn province_id_index() {
+        let id = ProvinceId(NonZeroU32::new(1).unwrap());
+        assert_eq!(id.index(), 0);
+        let id = ProvinceId(NonZeroU32::new(100).unwrap());
+        assert_eq!(id.index(), 99);
+    }
+
+    #[test]
+    fn nation_id_index() {
+        let id = NationId(NonZeroU32::new(1).unwrap());
+        assert_eq!(id.index(), 0);
+    }
+
+    #[test]
+    fn game_date_default() {
+        let d = GameDate::default();
+        assert_eq!(d.day, 1);
+        assert_eq!(d.month, 1);
+        assert_eq!(d.year, 1444);
+    }
+
+    #[test]
+    fn map_layout_get_set() {
+        let mut map = MapLayout::new(10, 5);
+        assert_eq!(map.tile_count(), 50);
+        assert_eq!(map.get(0, 0), 0);
+        map.set(2, 1, 7);
+        assert_eq!(map.get(2, 1), 7);
+        assert_eq!(map.index(2, 1), 12);
+    }
+
+    #[test]
+    fn world_builder_inserts_resources() {
+        let mut world = World::new();
+        WorldBuilder::new().provinces(5).nations(3).build(&mut world);
+        let bounds = world.get_resource::<WorldBounds>().unwrap();
+        assert_eq!(bounds.province_count, 5);
+        assert_eq!(bounds.nation_count, 3);
+        let date = world.get_resource::<GameDate>().unwrap();
+        assert_eq!(date.year, 1444);
+        let store = world.get_resource::<ProvinceStore>().unwrap();
+        assert_eq!(store.provinces.len(), 5);
+        let nations = world.get_resource::<NationStore>().unwrap();
+        assert_eq!(nations.nations.len(), 3);
+    }
+
+    #[test]
+    fn world_builder_with_map_layout() {
+        let mut world = World::new();
+        WorldBuilder::new().provinces(2).nations(1).map_size(4, 3).build(&mut world);
+        let map_kind = world.get_resource::<MapKind>().unwrap();
+        let map = match map_kind {
+            MapKind::Square(m) => m,
+            _ => panic!("expected Square map"),
+        };
+        assert_eq!(map.width, 4);
+        assert_eq!(map.height, 3);
+        assert_eq!(map.tile_count(), 12);
+    }
+}

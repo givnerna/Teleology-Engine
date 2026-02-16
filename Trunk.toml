@@ -1,0 +1,12 @@
+# Trunk config for WebGL build (map editor + simulation)
+# Build: trunk build   Serve: trunk serve
+# From repo root: trunk build (builds the crate below into dist/)
+
+[build]
+# Build the editor lib as WASM (cdylib)
+target = "crates/teleology-editor"
+crate_type = "lib"
+release = false
+
+[watch]
+watch = ["crates/teleology-editor/src", "crates/teleology-core/src", "crates/teleology-runtime/src"]

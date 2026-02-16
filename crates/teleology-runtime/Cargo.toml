@@ -1,0 +1,28 @@
+[package]
+name = "teleology-runtime"
+version = "0.1.0"
+edition = "2021"
+description = "Application entry point, script loading, game loop"
+
+[[bin]]
+name = "teleology"
+path = "src/main.rs"
+
+[dependencies]
+teleology-core = { path = "../teleology-core" }
+teleology-script-api = { path = "../teleology-script-api" }
+
+# Native only: file watcher for hot reload (not on wasm)
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Audio: basic SFX/music playback (cross-platform desktop)
+kira = "0.9"
+
+# Video: optional FFmpeg-backed cutscene decoding
+ffmpeg-next = { version = "7", optional = true }
+
+notify = { version = "6", features = ["macos_kqueue"] }
+notify-debouncer-mini = "0.4"
+
+[features]
+# Enable FFmpeg-backed video decoding.
+video_ffmpeg = ["ffmpeg-next"]

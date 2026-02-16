@@ -1,0 +1,23 @@
+# Rust
+/target/
+**/*.rs.bk
+# C++ build
+cpp/build/
+cpp/out/
+*.o
+*.obj
+*.so
+*.dylib
+*.dll
+*.a
+*.lib
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Trunk / web
+dist/

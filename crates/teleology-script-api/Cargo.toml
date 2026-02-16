@@ -1,0 +1,19 @@
+[package]
+name = "teleology-script-api"
+version = "0.1.0"
+edition = "2021"
+description = "Stable C API for C++ scripting; engine calls into script libs"
+
+[dependencies]
+teleology-core = { path = "../teleology-core" }
+# Standard key codes (W3C UI Events); used for input API documentation and Rust key representation
+keyboard-types = "0.8"
+
+# Native only: dynamic library loading (not available on wasm)
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+libloading = "0.8"
+libc = "0.2"
+
+[build-dependencies]
+cbindgen = "0.26"
+

@@ -1,0 +1,8 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/teleology-core",
+    "crates/teleology-script-api",
+    "crates/teleology-runtime",
+    "crates/teleology-editor",
+]

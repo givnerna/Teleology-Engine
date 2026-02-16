@@ -1,0 +1,183 @@
+================================================================================
+TELEOLOGY ENGINE — C++ SCRIPT API GUIDE
+================================================================================
+
+This guide describes how to write and build a C++ script (shared library) for
+the Teleology grand strategy engine. The engine loads your library at runtime
+and calls your callbacks; your script calls back into the engine via the C API.
+
+Include path:  cpp/include/teleology.h
+Sample script: cpp/script/main.cpp
+
+--------------------------------------------------------------------------------
+1. OVERVIEW
+--------------------------------------------------------------------------------
+
+- Your script is a shared library (.dll on Windows, .dylib on macOS, .so on Linux).
+- You must export exactly one symbol: teleology_script_get_api()
+- That function returns a pointer to a TeleologyScriptApi struct filled with your
+  callback function pointers.
+- The engine calls your callbacks at the appropriate times (init, daily tick, etc.).
+- Inside any callback you receive TeleologyEngine* — pass it to the engine API
+  functions to read or modify game state (date, provinces, owners, etc.).
+
+--------------------------------------------------------------------------------
+2. BUILDING YOUR SCRIPT
+--------------------------------------------------------------------------------
+
+Include the header and link only against the C runtime; the engine provides the
+teleology_get_* symbols when your DLL is loaded into the engine process.
+
+  Linux:
+    c++ -std=c++17 -shared -fPIC -I/path/to/cpp/include your_script.cpp -o libmyscript.so
+
+  macOS:
+    c++ -std=c++17 -shared -dynamiclib -I/path/to/cpp/include your_script.cpp -o libmyscript.dylib
+
+  Windows (MSVC):
+    cl /LD /I path\to\cpp\include your_script.cpp /Fe:myscript.dll
+
+  Windows (MinGW):
+    g++ -std=c++17 -shared -I/path/to/cpp/include your_script.cpp -o myscript.dll
+
+Engine expects these library names (no path):
+  Windows:  myscript.dll
+  macOS:    libmyscript.dylib
+  Linux:    libmyscript.so
+
+--------------------------------------------------------------------------------
+3. SCRIPT CONTRACT: EXPORT AND VTABLE
+--------------------------------------------------------------------------------
+
+You must define and export:
+
+  extern "C" const TeleologyScriptApi* teleology_script_get_api(void);
+
+Return a pointer to a static TeleologyScriptApi. The pointer must remain valid
+for the lifetime of the process (do not return a pointer to a local or
+temporary).
+
+TeleologyScriptApi:
+
+  typedef struct TeleologyScriptApi {
+      uint32_t version;           // Set to 1
+      void (*on_init)(TeleologyEngine* engine);
+      void (*on_daily_tick)(TeleologyEngine* engine);
+      void (*on_monthly_tick)(TeleologyEngine* engine);
+      void (*on_yearly_tick)(TeleologyEngine* engine);
+      void (*on_event)(TeleologyEngine* engine, uint32_t event_id,
+                       const uint8_t* payload, uint32_t payload_len);
+  } TeleologyScriptApi;
+
+All function pointers must be non-null. Use no-op stubs if you don't need a hook.
+
+--------------------------------------------------------------------------------
+4. CALLBACKS (WHEN THE ENGINE CALLS YOU)
+--------------------------------------------------------------------------------
+
+on_init(engine)
+  Called once when the script is loaded. Use for one-time setup.
+
+on_daily_tick(engine)
+  Called every simulation day. Use for daily logic (movement, attrition, etc.).
+
+on_monthly_tick(engine)
+  Called on the first day of each month. Use for income, recruitment, events.
+
+on_yearly_tick(engine)
+  Called on the first day of each year. Use for census, tech, major decisions.
+
+on_event(engine, event_id, payload, payload_len)
+  Called when the engine fires a script event. event_id and payload are
+  defined by your game/engine extension; payload may be NULL if payload_len is 0.
+
+You must not store the TeleologyEngine* pointer for use outside the current
+callback; only use it during the callback. The engine may change between
+loads (e.g. hot reload).
+
+--------------------------------------------------------------------------------
+5. ENGINE API (CALLING THE ENGINE FROM C++)
+--------------------------------------------------------------------------------
+
+All of these take TeleologyEngine* as the first argument. Pass the pointer
+you receive in the current callback. Do not call these from other threads.
+
+  CGameDate teleology_get_date(TeleologyEngine* engine);
+    Returns the current game date (day, month, year). Year can be negative.
+
+  uint32_t teleology_get_province_count(TeleologyEngine* engine);
+    Returns the total number of provinces (fixed at world creation).
+
+  CNationId teleology_get_province_owner(TeleologyEngine* engine, CProvinceId province);
+    Returns the nation that owns the given province. raw 0 means unowned.
+
+  void teleology_set_province_owner(TeleologyEngine* engine, CProvinceId province, CNationId nation);
+    Sets the owner of the province. Use nation.raw = 0 to set unowned.
+
+--------------------------------------------------------------------------------
+6. TYPES
+--------------------------------------------------------------------------------
+
+TeleologyEngine
+  Opaque. Do not dereference. Only pass to the engine API.
+
+CGameDate
+  struct { uint16_t day; uint8_t month; int32_t year; }
+  Calendar: day 1–31, month 1–12, year (e.g. 1444).
+
+CProvinceId
+  struct { uint32_t raw; }
+  Province index. 1-based: valid IDs are 1 .. province_count. 0 is invalid.
+
+CNationId
+  struct { uint32_t raw; }
+  Nation index. 1-based: valid IDs are 1 .. nation_count. 0 means “no nation”
+  (e.g. unowned province).
+
+--------------------------------------------------------------------------------
+7. CONVENTIONS AND NOTES
+--------------------------------------------------------------------------------
+
+- IDs are 1-based. Province 1 is the first province, nation 1 is the first nation.
+- province.raw == 0 or nation.raw == 0 is invalid for province ID; for nation
+  it means “no owner” when setting province owner.
+- The engine advances the calendar (day/month/year) and then runs daily,
+  then monthly (if new month), then yearly (if new year) systems, then calls
+  your on_daily_tick (and on_monthly_tick / on_yearly_tick when applicable).
+- Keep callbacks short; avoid blocking or long work so the game stays responsive.
+- Scripting is not available on WebGL builds; this API is for native (Windows,
+  macOS, Linux) only.
+
+--------------------------------------------------------------------------------
+8. MINIMAL EXAMPLE
+--------------------------------------------------------------------------------
+
+  #include "teleology.h"
+
+  static void on_init(TeleologyEngine* engine) { (void)engine; }
+  static void on_daily_tick(TeleologyEngine* engine) { (void)engine; }
+  static void on_monthly_tick(TeleologyEngine* engine) {
+      uint32_t n = teleology_get_province_count(engine);
+      (void)n;
+  }
+  static void on_yearly_tick(TeleologyEngine* engine) { (void)engine; }
+  static void on_event(TeleologyEngine* e, uint32_t id, const uint8_t* p, uint32_t len) {
+      (void)e; (void)id; (void)p; (void)len;
+  }
+
+  static const TeleologyScriptApi kApi = {
+      .version = 1,
+      .on_init = on_init,
+      .on_daily_tick = on_daily_tick,
+      .on_monthly_tick = on_monthly_tick,
+      .on_yearly_tick = on_yearly_tick,
+      .on_event = on_event,
+  };
+
+  extern "C" const TeleologyScriptApi* teleology_script_get_api(void) {
+      return &kApi;
+  }
+
+================================================================================
+END OF C++ API GUIDE
+================================================================================

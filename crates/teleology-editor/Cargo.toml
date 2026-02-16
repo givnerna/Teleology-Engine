@@ -1,0 +1,30 @@
+[package]
+name = "teleology-editor"
+version = "0.1.0"
+edition = "2021"
+description = "Map editor and hot-reload UI for Teleology"
+
+[lib]
+name = "teleology_editor"
+path = "src/lib.rs"
+crate-type = ["rlib", "cdylib"]
+
+[[bin]]
+name = "teleology-editor"
+path = "src/main.rs"
+
+[dependencies]
+eframe = { version = "0.29", features = ["glow"] }
+egui = "0.29"
+teleology-core = { path = "../teleology-core" }
+teleology-runtime = { path = "../teleology-runtime" }
+
+# Native only: file dialog for Load/Save map
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rfd = "0.14"
+
+# WebGL (wasm) entry point
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+console_error_panic_hook = "0.1"
