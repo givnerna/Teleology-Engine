@@ -49,13 +49,13 @@ pub use map_file::{
     compute_adjacency, compute_adjacency_from_hex, compute_adjacency_from_layout,
     compute_adjacency_from_vector, MapFile,
 };
-pub use simulation::{SimulationSchedule, TickRate, WorldSimulation};
+pub use simulation::{advance_time_in_place, SimulationSchedule, TickRate, WorldSimulation};
 pub use tags::{
     NationTags, ProvinceTags, ScopedTags, TagDef, TagId, TagRegistry, TagTypeDef, TagTypeId,
 };
 pub use world::GameWorld;
 pub use world::{
-    add_province_to_world, GameDate, HexMapLayout, MapKind, MapLayout, NationId, NationStore,
-    ProvinceAdjacency, ProvinceId, ProvincePolygon, ProvinceStore, ScopeId, VectorMapLayout,
-    WorldBounds, WorldBuilder,
+    add_province_to_world, GameDate, GameTime, HexMapLayout, MapKind, MapLayout, NationId,
+    NationStore, ProvinceAdjacency, ProvinceId, ProvincePolygon, ProvinceStore, ScopeId,
+    TickUnit, TimeConfig, VectorMapLayout, WorldBounds, WorldBuilder,
 };

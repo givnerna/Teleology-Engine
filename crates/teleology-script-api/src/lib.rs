@@ -9,13 +9,26 @@ pub mod ffi;
 #[repr(C)]
 pub struct TeleologyEngine(*mut std::ffi::c_void);
 
-/// C-compatible game date for scripts.
+/// C-compatible game date for scripts (backward compatible: day/month/year).
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct CGameDate {
     pub day: u16,
     pub month: u8,
     pub year: i32,
+}
+
+/// C-compatible full-precision game time for scripts (includes sub-day fields + tick counter).
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct CGameTime {
+    pub second: u8,
+    pub minute: u8,
+    pub hour: u8,
+    pub day: u16,
+    pub month: u8,
+    pub year: i32,
+    pub tick: u64,
 }
 
 /// C-compatible province id (1-based index).
@@ -204,6 +217,7 @@ pub use keyboard_types::Code;
 /// Engine-side API: what the engine exposes to scripts via TeleologyEngine.
 pub trait EngineApi {
     fn get_date(&self) -> CGameDate;
+    fn get_time(&self) -> CGameTime { CGameTime::default() }
     fn get_province_count(&self) -> u32;
     fn get_province_owner(&self, province: CProvinceId) -> CNationId;
     fn set_province_owner(&mut self, province: CProvinceId, nation: CNationId);

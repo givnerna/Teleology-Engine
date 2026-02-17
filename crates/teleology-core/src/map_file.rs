@@ -13,8 +13,8 @@ use crate::modifiers::{CharacterModifiers, NationModifiers, ProvinceModifiers};
 use crate::progress_trees::{ProgressState, ProgressTrees};
 use crate::tags::{NationTags, ProvinceTags, TagRegistry};
 use crate::world::{
-    GameDate, HexMapLayout, MapKind, MapLayout, NationStore, ProvinceAdjacency, ProvinceId,
-    ProvinceStore, VectorMapLayout, WorldBounds,
+    GameDate, GameTime, HexMapLayout, MapKind, MapLayout, NationStore, ProvinceAdjacency,
+    ProvinceId, ProvinceStore, TimeConfig, VectorMapLayout, WorldBounds,
 };
 
 const MAP_FILE_VERSION: u32 = 3;
@@ -25,6 +25,8 @@ pub struct MapFile {
     pub version: u32,
     pub bounds: WorldBounds,
     pub date: GameDate,
+    pub time: Option<GameTime>,
+    pub time_config: Option<TimeConfig>,
     pub map_kind: MapKind,
     pub adjacency: ProvinceAdjacency,
     pub provinces: Vec<Province>,
@@ -58,6 +60,8 @@ impl MapFile {
     pub fn from_world(world: &mut bevy_ecs::world::World) -> Option<Self> {
         let bounds = world.get_resource::<WorldBounds>()?.clone();
         let date = *world.get_resource::<GameDate>()?;
+        let time = world.get_resource::<GameTime>().copied();
+        let time_config = world.get_resource::<TimeConfig>().cloned();
         let map_kind = world.get_resource::<MapKind>()?.clone();
         let adjacency = world
             .get_resource::<ProvinceAdjacency>()
@@ -128,6 +132,8 @@ impl MapFile {
             version: MAP_FILE_VERSION,
             bounds,
             date,
+            time,
+            time_config,
             map_kind,
             adjacency,
             provinces,
@@ -177,6 +183,12 @@ impl MapFile {
     pub fn apply_to_world(&self, world: &mut bevy_ecs::world::World) {
         world.insert_resource(self.bounds.clone());
         world.insert_resource(self.date);
+        if let Some(time) = self.time {
+            world.insert_resource(time);
+        }
+        if let Some(ref config) = self.time_config {
+            world.insert_resource(config.clone());
+        }
         world.insert_resource(self.map_kind.clone());
         world.insert_resource(self.adjacency.clone());
         world.insert_resource(ProvinceStore {
