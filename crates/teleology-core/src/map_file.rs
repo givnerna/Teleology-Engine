@@ -158,6 +158,21 @@ impl MapFile {
         bincode::deserialize_from(r)
     }
 
+    /// Write to a stream as JSON.
+    pub fn write_json<W: Write>(&self, w: &mut W) -> Result<(), serde_json::Error> {
+        serde_json::to_writer(w, self)
+    }
+
+    /// Write to a stream as pretty-printed JSON.
+    pub fn write_json_pretty<W: Write>(&self, w: &mut W) -> Result<(), serde_json::Error> {
+        serde_json::to_writer_pretty(w, self)
+    }
+
+    /// Read from a JSON stream.
+    pub fn read_json<R: Read>(r: &mut R) -> Result<Self, serde_json::Error> {
+        serde_json::from_reader(r)
+    }
+
     /// Apply this map file to an existing world (replaces map-related resources).
     pub fn apply_to_world(&self, world: &mut bevy_ecs::world::World) {
         world.insert_resource(self.bounds.clone());

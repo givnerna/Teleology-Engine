@@ -9,6 +9,16 @@ use std::num::NonZeroU32;
 
 use crate::archetypes::{Nation, Province};
 
+/// Trait for scope ids (ProvinceId, NationId) so generic systems can work with either.
+pub trait ScopeId: Clone + Copy + PartialEq + Eq + std::hash::Hash + Send + Sync + 'static {
+    /// Dense 0-based index for array access.
+    fn index(self) -> usize;
+    /// Raw 1-based id value.
+    fn raw(self) -> u32;
+    /// Construct from a raw 1-based id. Panics if raw == 0.
+    fn from_raw(raw: u32) -> Self;
+}
+
 /// Stable id for a province (map slot). Dense index into province arrays.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ProvinceId(pub NonZeroU32);
@@ -20,6 +30,15 @@ impl ProvinceId {
     }
 }
 
+impl ScopeId for ProvinceId {
+    #[inline]
+    fn index(self) -> usize { (self.0.get() - 1) as usize }
+    #[inline]
+    fn raw(self) -> u32 { self.0.get() }
+    #[inline]
+    fn from_raw(raw: u32) -> Self { ProvinceId(NonZeroU32::new(raw).unwrap()) }
+}
+
 /// Stable id for a nation/tag.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct NationId(pub NonZeroU32);
@@ -29,6 +48,15 @@ impl NationId {
     pub fn index(self) -> usize {
         (self.0.get() - 1) as usize
     }
+}
+
+impl ScopeId for NationId {
+    #[inline]
+    fn index(self) -> usize { (self.0.get() - 1) as usize }
+    #[inline]
+    fn raw(self) -> u32 { self.0.get() }
+    #[inline]
+    fn from_raw(raw: u32) -> Self { NationId(NonZeroU32::new(raw).unwrap()) }
 }
 
 /// Entity handle for units (can be many; use ECS or secondary SoA).
@@ -509,7 +537,7 @@ pub fn add_province_to_world(world: &mut World) -> Option<u32> {
         adj.adjacent.push(Vec::new());
     }
     if let Some(mut pm) = world.get_resource_mut::<crate::modifiers::ProvinceModifiers>() {
-        pm.per_province.push(Vec::new());
+        pm.per_scope.push(Vec::new());
     }
     if let Some(mut ps) = world.get_resource_mut::<crate::progress_trees::ProgressState>() {
         ps.per_province.push(std::collections::HashMap::new());
@@ -520,6 +548,47 @@ pub fn add_province_to_world(world: &mut World) -> Option<u32> {
 
 /// Convenience type for the full game world (ECS + resources).
 pub type GameWorld = World;
+
+/// Macro to register a custom scope id type, generating `ScopeId` impl and `Resource` impls
+/// for `ScopedModifiers<T>`, `ScopedTags<T>`, and `ScopedProgress<T>`.
+///
+/// Usage:
+/// ```ignore
+/// // Define your id type (must be a newtype over NonZeroU32).
+/// #[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// pub struct CityId(pub NonZeroU32);
+///
+/// // Register it as a scope — generates ScopeId impl + Resource impls for all generic scope types.
+/// teleology_core::register_scope!(CityId);
+///
+/// // Now you can use:
+/// //   ScopedModifiers<CityId> as a Bevy Resource
+/// //   ScopedTags<CityId> as a Bevy Resource
+/// //   ScopedProgress<CityId> as a Bevy Resource
+/// ```
+#[macro_export]
+macro_rules! register_scope {
+    ($id_type:ty) => {
+        impl $crate::world::ScopeId for $id_type {
+            #[inline]
+            fn index(self) -> usize {
+                (self.0.get() - 1) as usize
+            }
+            #[inline]
+            fn raw(self) -> u32 {
+                self.0.get()
+            }
+            #[inline]
+            fn from_raw(raw: u32) -> Self {
+                Self(::std::num::NonZeroU32::new(raw).unwrap())
+            }
+        }
+
+        impl bevy_ecs::prelude::Resource for $crate::modifiers::ScopedModifiers<$id_type> {}
+        impl bevy_ecs::prelude::Resource for $crate::tags::ScopedTags<$id_type> {}
+        impl bevy_ecs::prelude::Resource for $crate::progress_trees::ScopedProgress<$id_type> {}
+    };
+}
 
 #[cfg(test)]
 mod tests {

@@ -465,7 +465,7 @@ pub extern "C" fn teleology_eventbus_publish(
     } else {
         unsafe { std::slice::from_raw_parts(payload, payload_len as usize) }.to_vec()
     };
-    publish_event(world, &topic, EventScopeRef::Global, payload_type_id, bytes, 0);
+    publish_event(world, &topic, EventScopeRef::global(), payload_type_id, bytes, 0);
 }
 
 /// Poll next eventbus message. Returns payload_len (0 if none).

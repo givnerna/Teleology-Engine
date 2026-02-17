@@ -5,9 +5,10 @@
 
 use bevy_ecs::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::marker::PhantomData;
 use std::num::NonZeroU32;
 
-use crate::world::{GameDate, NationId, ProvinceId};
+use crate::world::{GameDate, NationId, ProvinceId, ScopeId};
 
 /// Stable id for a modifier instance.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -47,19 +48,21 @@ pub trait ModifierCalculator: Send + Sync {
     fn apply_custom(&self, op_id: u32, base: f64, value: f64) -> f64;
 }
 
-/// Modifiers attached to provinces (indexed by ProvinceId).
-#[derive(Resource, Clone, Default, Serialize, Deserialize)]
-pub struct ProvinceModifiers {
-    /// per_province[i] = modifiers for ProvinceId(i+1)
-    pub per_province: Vec<Vec<Modifier>>,
+/// Generic modifiers indexed by any ScopeId (ProvinceId, NationId, etc.).
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub struct ScopedModifiers<Id: ScopeId> {
+    pub per_scope: Vec<Vec<Modifier>>,
     pub next_id_raw: u32,
+    #[serde(skip)]
+    _marker: PhantomData<Id>,
 }
 
-impl ProvinceModifiers {
-    pub fn new(province_count: usize) -> Self {
+impl<Id: ScopeId> ScopedModifiers<Id> {
+    pub fn new(count: usize) -> Self {
         Self {
-            per_province: vec![Vec::new(); province_count],
+            per_scope: vec![Vec::new(); count],
             next_id_raw: 1,
+            _marker: PhantomData,
         }
     }
 
@@ -69,74 +72,42 @@ impl ProvinceModifiers {
         ModifierId(NonZeroU32::new(raw).unwrap())
     }
 
-    pub fn list(&self, province: ProvinceId) -> &[Modifier] {
-        self.per_province
-            .get(province.index())
+    pub fn list(&self, id: Id) -> &[Modifier] {
+        self.per_scope
+            .get(id.index())
             .map(Vec::as_slice)
             .unwrap_or(&[])
     }
 
-    pub fn add(&mut self, province: ProvinceId, mut m: Modifier) -> ModifierId {
-        let id = self.alloc_id();
-        m.id = id;
-        if let Some(v) = self.per_province.get_mut(province.index()) {
+    pub fn add(&mut self, id: Id, mut m: Modifier) -> ModifierId {
+        let mid = self.alloc_id();
+        m.id = mid;
+        if let Some(v) = self.per_scope.get_mut(id.index()) {
             v.push(m);
         }
-        id
+        mid
     }
 
-    pub fn remove(&mut self, province: ProvinceId, id: ModifierId) -> bool {
-        let Some(v) = self.per_province.get_mut(province.index()) else { return false };
+    pub fn remove(&mut self, id: Id, mid: ModifierId) -> bool {
+        let Some(v) = self.per_scope.get_mut(id.index()) else { return false };
         let before = v.len();
-        v.retain(|m| m.id != id);
+        v.retain(|m| m.id != mid);
         before != v.len()
     }
 }
 
-/// Modifiers attached to nations (indexed by NationId).
-#[derive(Resource, Clone, Default, Serialize, Deserialize)]
-pub struct NationModifiers {
-    pub per_nation: Vec<Vec<Modifier>>,
-    pub next_id_raw: u32,
-}
+/// Modifiers attached to provinces. Type alias for backwards compatibility.
+pub type ProvinceModifiers = ScopedModifiers<ProvinceId>;
 
-impl NationModifiers {
-    pub fn new(nation_count: usize) -> Self {
-        Self {
-            per_nation: vec![Vec::new(); nation_count],
-            next_id_raw: 1,
-        }
-    }
+/// Modifiers attached to nations. Type alias for backwards compatibility.
+pub type NationModifiers = ScopedModifiers<NationId>;
 
-    fn alloc_id(&mut self) -> ModifierId {
-        let raw = self.next_id_raw.max(1);
-        self.next_id_raw = raw.saturating_add(1);
-        ModifierId(NonZeroU32::new(raw).unwrap())
-    }
-
-    pub fn list(&self, nation: NationId) -> &[Modifier] {
-        self.per_nation
-            .get(nation.index())
-            .map(Vec::as_slice)
-            .unwrap_or(&[])
-    }
-
-    pub fn add(&mut self, nation: NationId, mut m: Modifier) -> ModifierId {
-        let id = self.alloc_id();
-        m.id = id;
-        if let Some(v) = self.per_nation.get_mut(nation.index()) {
-            v.push(m);
-        }
-        id
-    }
-
-    pub fn remove(&mut self, nation: NationId, id: ModifierId) -> bool {
-        let Some(v) = self.per_nation.get_mut(nation.index()) else { return false };
-        let before = v.len();
-        v.retain(|m| m.id != id);
-        before != v.len()
-    }
-}
+// Resource impls — Bevy requires Resource on concrete types, not generic.
+// We implement Resource for the two concrete aliases via wrapper newtype or direct impl.
+// Since type aliases can't have trait impls, we use the blanket approach:
+// ScopedModifiers<ProvinceId> and ScopedModifiers<NationId> both need Resource.
+impl Resource for ScopedModifiers<ProvinceId> {}
+impl Resource for ScopedModifiers<NationId> {}
 
 /// Modifiers attached to a character entity.
 #[derive(Component, Clone, Default, Serialize, Deserialize)]
@@ -190,4 +161,3 @@ pub fn apply_modifiers(
     }
     base
 }
-

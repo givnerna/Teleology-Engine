@@ -31,28 +31,31 @@ pub use events::{
     EventQueue, EventRegistry, EventScope,
 };
 pub use event_bus::{
-    publish_event, EventBus, EventEnvelope, EventPayload, EventScopeRef, EventTopicId,
+    publish_event, EntityScopeRef, EventBus, EventEnvelope, EventPayload, EventScopeRef,
+    EventTopicId, scope_types,
 };
 pub use progress_trees::{
-    NodeId, ProgressNode, ProgressState, ProgressTreeDefinition, ProgressTrees, TreeId,
-    TreeProgressState,
+    NationProgress, NodeId, ProgressNode, ProgressState, ProgressTreeDefinition, ProgressTrees,
+    ProvinceProgress, ScopedProgress, TreeId, TreeProgressState,
 };
 pub use armies::{
     spawn_army, Army, ArmyCommander, ArmyComposition, ArmyId, ArmyRegistry, ArmyStatus, UnitStack,
 };
 pub use modifiers::{
     apply_modifiers, ArmyModifiers, CharacterModifiers, Modifier, ModifierCalculator, ModifierId,
-    ModifierTypeId, ModifierValue, NationModifiers, ProvinceModifiers,
+    ModifierTypeId, ModifierValue, NationModifiers, ProvinceModifiers, ScopedModifiers,
 };
 pub use map_file::{
     compute_adjacency, compute_adjacency_from_hex, compute_adjacency_from_layout,
     compute_adjacency_from_vector, MapFile,
 };
 pub use simulation::{SimulationSchedule, TickRate, WorldSimulation};
-pub use tags::{NationTags, ProvinceTags, TagDef, TagId, TagRegistry, TagTypeDef, TagTypeId};
+pub use tags::{
+    NationTags, ProvinceTags, ScopedTags, TagDef, TagId, TagRegistry, TagTypeDef, TagTypeId,
+};
 pub use world::GameWorld;
 pub use world::{
     add_province_to_world, GameDate, HexMapLayout, MapKind, MapLayout, NationId, NationStore,
-    ProvinceAdjacency, ProvinceId, ProvincePolygon, ProvinceStore, VectorMapLayout, WorldBounds,
-    WorldBuilder,
+    ProvinceAdjacency, ProvinceId, ProvincePolygon, ProvinceStore, ScopeId, VectorMapLayout,
+    WorldBounds, WorldBuilder,
 };
