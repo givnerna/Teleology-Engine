@@ -1,7 +1,9 @@
-# Rust
+# ── Rust / Cargo ──────────────────────────────────────
 /target/
 **/*.rs.bk
-# C++ build
+Cargo.lock.bak
+
+# ── C++ build artifacts ──────────────────────────────
 cpp/build/
 cpp/out/
 *.o
@@ -11,13 +13,41 @@ cpp/out/
 *.dll
 *.a
 *.lib
+*.exp
+*.pdb
 
-# IDE / OS
+# ── Dev-generated content (resources/) ───────────────
+# Compiled scripts (keep source .cpp/.h, ignore built libs)
+resources/scripts/*.so
+resources/scripts/*.dylib
+resources/scripts/*.dll
+# Saved maps, exported data
+resources/**/*.tmap
+resources/**/*.json
+resources/**/*.bin
+# Let devs opt-in to tracking specific content via git add -f
+
+# ── IDE / Editor ─────────────────────────────────────
 .idea/
 .vscode/
 *.swp
 *.swo
-.DS_Store
+*~
+*.kate-swp
+.project
+.classpath
+.settings/
 
-# Trunk / web
+# ── OS files ─────────────────────────────────────────
+.DS_Store
+Thumbs.db
+Desktop.ini
+._*
+
+# ── Trunk / WebGL ────────────────────────────────────
 dist/
+
+# ── Misc ─────────────────────────────────────────────
+*.log
+*.bak
+*.tmp
