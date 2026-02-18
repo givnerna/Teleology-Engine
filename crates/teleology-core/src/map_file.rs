@@ -13,8 +13,8 @@ use crate::modifiers::{CharacterModifiers, NationModifiers, ProvinceModifiers};
 use crate::progress_trees::{ProgressState, ProgressTrees};
 use crate::tags::{NationTags, ProvinceTags, TagRegistry};
 use crate::world::{
-    GameDate, HexMapLayout, MapKind, MapLayout, NationStore, ProvinceAdjacency, ProvinceId,
-    ProvinceStore, VectorMapLayout, WorldBounds,
+    GameDate, GameTime, HexMapLayout, MapKind, MapLayout, NationStore, ProvinceAdjacency,
+    ProvinceId, ProvinceStore, TimeConfig, VectorMapLayout, WorldBounds,
 };
 
 const MAP_FILE_VERSION: u32 = 3;
@@ -25,6 +25,8 @@ pub struct MapFile {
     pub version: u32,
     pub bounds: WorldBounds,
     pub date: GameDate,
+    pub time: Option<GameTime>,
+    pub time_config: Option<TimeConfig>,
     pub map_kind: MapKind,
     pub adjacency: ProvinceAdjacency,
     pub provinces: Vec<Province>,
@@ -49,6 +51,24 @@ pub struct MapFile {
 
     pub characters: Vec<CharacterSave>,
     pub armies: Vec<ArmySave>,
+
+    // Tier 1 gameplay systems (present only if enabled).
+    pub economy_config: Option<crate::economy::EconomyConfig>,
+    pub nation_budgets: Option<crate::economy::NationBudgets>,
+    pub goods_registry: Option<crate::economy::GoodsRegistry>,
+    pub province_economy: Option<crate::economy::ProvinceEconomy>,
+    pub trade_network: Option<crate::economy::TradeNetwork>,
+
+    pub diplomacy_config: Option<crate::diplomacy::DiplomacyConfig>,
+    pub diplomatic_relations: Option<crate::diplomacy::DiplomaticRelations>,
+    pub war_registry: Option<crate::diplomacy::WarRegistry>,
+
+    pub combat_model: Option<crate::combat::CombatModel>,
+    pub unit_type_registry: Option<crate::combat::UnitTypeRegistry>,
+    pub combat_result_log: Option<crate::combat::CombatResultLog>,
+
+    pub population_config: Option<crate::population::PopulationConfig>,
+    pub province_pops: Option<crate::population::ProvincePops>,
 }
 
 impl MapFile {
@@ -58,6 +78,8 @@ impl MapFile {
     pub fn from_world(world: &mut bevy_ecs::world::World) -> Option<Self> {
         let bounds = world.get_resource::<WorldBounds>()?.clone();
         let date = *world.get_resource::<GameDate>()?;
+        let time = world.get_resource::<GameTime>().copied();
+        let time_config = world.get_resource::<TimeConfig>().cloned();
         let map_kind = world.get_resource::<MapKind>()?.clone();
         let adjacency = world
             .get_resource::<ProvinceAdjacency>()
@@ -124,10 +146,30 @@ impl MapFile {
             }
         }
 
+        // Tier 1 gameplay systems.
+        let economy_config = world.get_resource::<crate::economy::EconomyConfig>().cloned();
+        let nation_budgets = world.get_resource::<crate::economy::NationBudgets>().cloned();
+        let goods_registry = world.get_resource::<crate::economy::GoodsRegistry>().cloned();
+        let province_economy = world.get_resource::<crate::economy::ProvinceEconomy>().cloned();
+        let trade_network = world.get_resource::<crate::economy::TradeNetwork>().cloned();
+
+        let diplomacy_config = world.get_resource::<crate::diplomacy::DiplomacyConfig>().cloned();
+        let diplomatic_relations = world.get_resource::<crate::diplomacy::DiplomaticRelations>().cloned();
+        let war_registry = world.get_resource::<crate::diplomacy::WarRegistry>().cloned();
+
+        let combat_model = world.get_resource::<crate::combat::CombatModel>().cloned();
+        let unit_type_registry = world.get_resource::<crate::combat::UnitTypeRegistry>().cloned();
+        let combat_result_log = world.get_resource::<crate::combat::CombatResultLog>().cloned();
+
+        let population_config = world.get_resource::<crate::population::PopulationConfig>().cloned();
+        let province_pops = world.get_resource::<crate::population::ProvincePops>().cloned();
+
         Some(Self {
             version: MAP_FILE_VERSION,
             bounds,
             date,
+            time,
+            time_config,
             map_kind,
             adjacency,
             provinces,
@@ -145,6 +187,19 @@ impl MapFile {
             progress_state,
             characters,
             armies,
+            economy_config,
+            nation_budgets,
+            goods_registry,
+            province_economy,
+            trade_network,
+            diplomacy_config,
+            diplomatic_relations,
+            war_registry,
+            combat_model,
+            unit_type_registry,
+            combat_result_log,
+            population_config,
+            province_pops,
         })
     }
 
@@ -177,6 +232,12 @@ impl MapFile {
     pub fn apply_to_world(&self, world: &mut bevy_ecs::world::World) {
         world.insert_resource(self.bounds.clone());
         world.insert_resource(self.date);
+        if let Some(time) = self.time {
+            world.insert_resource(time);
+        }
+        if let Some(ref config) = self.time_config {
+            world.insert_resource(config.clone());
+        }
         world.insert_resource(self.map_kind.clone());
         world.insert_resource(self.adjacency.clone());
         world.insert_resource(ProvinceStore {
@@ -219,6 +280,47 @@ impl MapFile {
         }
         if let Some(state) = &self.progress_state {
             world.insert_resource(state.clone());
+        }
+
+        // Tier 1 gameplay systems.
+        if let Some(ref ec) = self.economy_config {
+            world.insert_resource(ec.clone());
+        }
+        if let Some(ref nb) = self.nation_budgets {
+            world.insert_resource(nb.clone());
+        }
+        if let Some(ref gr) = self.goods_registry {
+            world.insert_resource(gr.clone());
+        }
+        if let Some(ref pe) = self.province_economy {
+            world.insert_resource(pe.clone());
+        }
+        if let Some(ref tn) = self.trade_network {
+            world.insert_resource(tn.clone());
+        }
+        if let Some(ref dc) = self.diplomacy_config {
+            world.insert_resource(dc.clone());
+        }
+        if let Some(ref dr) = self.diplomatic_relations {
+            world.insert_resource(dr.clone());
+        }
+        if let Some(ref wr) = self.war_registry {
+            world.insert_resource(wr.clone());
+        }
+        if let Some(ref cm) = self.combat_model {
+            world.insert_resource(cm.clone());
+        }
+        if let Some(ref utr) = self.unit_type_registry {
+            world.insert_resource(utr.clone());
+        }
+        if let Some(ref crl) = self.combat_result_log {
+            world.insert_resource(crl.clone());
+        }
+        if let Some(ref pc) = self.population_config {
+            world.insert_resource(pc.clone());
+        }
+        if let Some(ref pp) = self.province_pops {
+            world.insert_resource(pp.clone());
         }
 
         // Rebuild ECS entities for characters.

@@ -15,8 +15,8 @@ use teleology_core::{
     WorldBounds, WorldSimulation,
 };
 use teleology_script_api::{
-    load_script_api, CArmyId, CGameDate, CNodeId, CNationId, CProvinceId, CTagId, CTagTypeId,
-    CTreeId, TeleologyEngine, TeleologyScriptApi, ScriptHandle,
+    load_script_api, CArmyId, CGameDate, CGameTime, CNodeId, CNationId, CProvinceId, CTagId,
+    CTagTypeId, CTreeId, TeleologyEngine, TeleologyScriptApi, ScriptHandle,
 };
 use std::num::NonZeroU32;
 use std::ffi::CStr;
@@ -173,7 +173,7 @@ impl EngineContext {
         #[cfg(not(target_arch = "wasm32"))]
         let _ = self.try_reload_script();
         let world = unsafe { &mut *self.world.get() };
-        WorldSimulation::tick_day(world);
+        WorldSimulation::tick(world);
 
         if let Some(api) = self.script_api {
             let engine = self as *mut EngineContext as *mut TeleologyEngine;
@@ -304,6 +304,27 @@ pub extern "C" fn teleology_get_date(engine: *mut TeleologyEngine) -> CGameDate 
             day: d.day,
             month: d.month,
             year: d.year,
+        })
+        .unwrap_or_default()
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_get_time(engine: *mut TeleologyEngine) -> CGameTime {
+    let ctx = match context_from_engine(engine) {
+        Some(c) => c,
+        None => return CGameTime::default(),
+    };
+    let world = unsafe { &*ctx.world.get() };
+    world
+        .get_resource::<teleology_core::GameTime>()
+        .map(|t| CGameTime {
+            second: t.second,
+            minute: t.minute,
+            hour: t.hour,
+            day: t.day,
+            month: t.month,
+            year: t.year,
+            tick: t.tick,
         })
         .unwrap_or_default()
 }

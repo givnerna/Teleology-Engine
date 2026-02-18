@@ -8,10 +8,10 @@ use std::num::NonZeroU32;
 use std::path::PathBuf;
 use teleology_core::{
     add_province_to_world, compute_adjacency, pull_next_event, queue_event, ArmyComposition,
-    ArmyRegistry, CharacterGenConfig, EventBus, EventQueue, EventRegistry, GameDate, MapFile,
-    MapKind, NationId, NationModifiers, NationStore, NationTags, ProgressState, ProgressTrees,
-    ProvinceId, ProvinceModifiers, ProvinceStore, ProvinceTags, TagId, TagRegistry, TagTypeId,
-    Army, spawn_army, ActiveEvent, WorldBounds,
+    ArmyRegistry, CharacterGenConfig, EventBus, EventQueue, EventRegistry, GameDate, GameTime,
+    MapFile, MapKind, NationId, NationModifiers, NationStore, NationTags, ProgressState,
+    ProgressTrees, ProvinceId, ProvinceModifiers, ProvinceStore, ProvinceTags, TagId, TagRegistry,
+    TagTypeId, TickUnit, TimeConfig, Army, spawn_army, ActiveEvent, WorldBounds,
 };
 use teleology_runtime::EngineContext;
 
@@ -1318,10 +1318,22 @@ impl EditorApp {
                 panel_header(ui, "Scene");
                 ui.add_space(6.0);
                 let date = self.engine.world().get_resource::<GameDate>().copied().unwrap_or_default();
+                let time = self.engine.world().get_resource::<GameTime>().copied();
+                let tick_unit = self.engine.world().get_resource::<TimeConfig>()
+                    .map(|c| c.tick_unit).unwrap_or(TickUnit::Day);
+                let needs_time = matches!(tick_unit, TickUnit::Second | TickUnit::Minute | TickUnit::Hour);
                 ui.horizontal(|ui| {
                     ui.strong("Date:");
                     ui.add_space(4.0);
-                    ui.label(format!("{}-{:02}-{:02}", date.year, date.month, date.day));
+                    if needs_time {
+                        if let Some(t) = time {
+                            ui.label(format!("{}-{:02}-{:02} {:02}:{:02}:{:02}", date.year, date.month, date.day, t.hour, t.minute, t.second));
+                        } else {
+                            ui.label(format!("{}-{:02}-{:02}", date.year, date.month, date.day));
+                        }
+                    } else {
+                        ui.label(format!("{}-{:02}-{:02}", date.year, date.month, date.day));
+                    }
                 });
                 ui.add_space(4.0);
 
@@ -2169,7 +2181,23 @@ impl EditorApp {
                 ui.heading("World");
             let world = self.engine.world();
             let date = world.get_resource::<GameDate>().copied().unwrap_or_default();
-            ui.label(format!("Date: {}-{:02}-{:02}", date.year, date.month, date.day));
+            let time = world.get_resource::<GameTime>().copied();
+            let tick_unit = world.get_resource::<TimeConfig>()
+                .map(|c| c.tick_unit).unwrap_or(TickUnit::Day);
+            let needs_time = matches!(tick_unit, TickUnit::Second | TickUnit::Minute | TickUnit::Hour);
+            if needs_time {
+                if let Some(t) = time {
+                    ui.label(format!("Date: {}-{:02}-{:02} {:02}:{:02}:{:02}  (tick {})", date.year, date.month, date.day, t.hour, t.minute, t.second, t.tick));
+                } else {
+                    ui.label(format!("Date: {}-{:02}-{:02}", date.year, date.month, date.day));
+                }
+            } else {
+                if let Some(t) = time {
+                    ui.label(format!("Date: {}-{:02}-{:02}  (tick {})", date.year, date.month, date.day, t.tick));
+                } else {
+                    ui.label(format!("Date: {}-{:02}-{:02}", date.year, date.month, date.day));
+                }
+            }
             if let Some(bounds) = world.get_resource::<WorldBounds>() {
                 ui.label(format!("Provinces: {}", bounds.province_count));
                 ui.label(format!("Nations: {}", bounds.nation_count));

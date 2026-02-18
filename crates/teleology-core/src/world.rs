@@ -20,7 +20,7 @@ pub trait ScopeId: Clone + Copy + PartialEq + Eq + std::hash::Hash + Send + Sync
 }
 
 /// Stable id for a province (map slot). Dense index into province arrays.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ProvinceId(pub NonZeroU32);
 
 impl ProvinceId {
@@ -304,7 +304,173 @@ impl NationStore {
     }
 }
 
+/// What unit of time a single simulation tick represents.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub enum TickUnit {
+    Second,
+    Minute,
+    Hour,
+    Day,
+    Week,
+    Month,
+    Year,
+}
+
+impl Default for TickUnit {
+    fn default() -> Self { TickUnit::Day }
+}
+
+/// Configuration for the simulation time system. Determines what a tick means
+/// and when the three schedule tiers (primary/secondary/tertiary) fire.
+///
+/// ## Presets
+/// - `TimeConfig::grand_strategy()` — tick=Day, secondary=Month, tertiary=Year (EU4/CK3)
+/// - `TimeConfig::tactical()` — tick=Hour, secondary=Day, tertiary=Month (HoI4-style)
+/// - `TimeConfig::realtime()` — tick=Second, secondary=Minute, tertiary=Hour (RTS)
+/// - `TimeConfig::civilization()` — tick=Year, secondary=10 years, tertiary=100 years (Civ)
+///
+/// ## Custom
+/// Use `TimeConfig::custom()` to set arbitrary thresholds.
+#[derive(Resource, Clone, Debug, Serialize, Deserialize)]
+pub struct TimeConfig {
+    /// What one simulation tick represents.
+    pub tick_unit: TickUnit,
+    /// How many ticks until the secondary schedule fires (e.g. 30 days = 1 month).
+    pub secondary_every: u32,
+    /// How many ticks until the tertiary schedule fires (e.g. 365 days = 1 year).
+    pub tertiary_every: u32,
+    /// Labels for the three schedule tiers (for UI display).
+    pub primary_label: String,
+    pub secondary_label: String,
+    pub tertiary_label: String,
+}
+
+impl Default for TimeConfig {
+    fn default() -> Self {
+        Self::grand_strategy()
+    }
+}
+
+impl TimeConfig {
+    /// EU4/CK3 style: tick=Day, secondary=Month (~30 days), tertiary=Year (~365 days).
+    pub fn grand_strategy() -> Self {
+        Self {
+            tick_unit: TickUnit::Day,
+            secondary_every: 30,
+            tertiary_every: 365,
+            primary_label: "Daily".into(),
+            secondary_label: "Monthly".into(),
+            tertiary_label: "Yearly".into(),
+        }
+    }
+
+    /// HoI4 style: tick=Hour, secondary=Day (24h), tertiary=Month (720h).
+    pub fn tactical() -> Self {
+        Self {
+            tick_unit: TickUnit::Hour,
+            secondary_every: 24,
+            tertiary_every: 24 * 30,
+            primary_label: "Hourly".into(),
+            secondary_label: "Daily".into(),
+            tertiary_label: "Monthly".into(),
+        }
+    }
+
+    /// RTS / real-time style: tick=Second, secondary=Minute (60s), tertiary=Hour (3600s).
+    pub fn realtime() -> Self {
+        Self {
+            tick_unit: TickUnit::Second,
+            secondary_every: 60,
+            tertiary_every: 3600,
+            primary_label: "Per Second".into(),
+            secondary_label: "Per Minute".into(),
+            tertiary_label: "Per Hour".into(),
+        }
+    }
+
+    /// Civilization style: tick=Year, secondary=Decade (10), tertiary=Century (100).
+    pub fn civilization() -> Self {
+        Self {
+            tick_unit: TickUnit::Year,
+            secondary_every: 10,
+            tertiary_every: 100,
+            primary_label: "Yearly".into(),
+            secondary_label: "Per Decade".into(),
+            tertiary_label: "Per Century".into(),
+        }
+    }
+
+    /// Fully custom configuration.
+    pub fn custom(
+        tick_unit: TickUnit,
+        secondary_every: u32,
+        tertiary_every: u32,
+        labels: [&str; 3],
+    ) -> Self {
+        Self {
+            tick_unit,
+            secondary_every,
+            tertiary_every,
+            primary_label: labels[0].into(),
+            secondary_label: labels[1].into(),
+            tertiary_label: labels[2].into(),
+        }
+    }
+}
+
+/// Full-precision game time. Tracks time down to the second regardless of tick unit.
+/// The tick counter drives schedule thresholds; the calendar fields provide human-readable display.
+#[derive(Resource, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct GameTime {
+    pub second: u8,
+    pub minute: u8,
+    pub hour: u8,
+    pub day: u16,
+    pub month: u8,
+    pub year: i32,
+    /// Total ticks elapsed since simulation start. Used for schedule threshold checks.
+    pub tick: u64,
+}
+
+impl Default for GameTime {
+    fn default() -> Self {
+        Self { second: 0, minute: 0, hour: 0, day: 1, month: 1, year: 1444, tick: 0 }
+    }
+}
+
+impl GameTime {
+    pub fn new(year: i32, month: u8, day: u16) -> Self {
+        Self { second: 0, minute: 0, hour: 0, day, month, year, tick: 0 }
+    }
+
+    pub fn with_time(year: i32, month: u8, day: u16, hour: u8, minute: u8, second: u8) -> Self {
+        Self { second, minute, hour, day, month, year, tick: 0 }
+    }
+
+    /// Total days since epoch for ordering and delta math (backward compatible).
+    #[inline]
+    pub fn to_days_since_epoch(self) -> i64 {
+        let y = self.year as i64;
+        let m = self.month as i64;
+        let d = self.day as i64;
+        (y * 365) + (m * 31) + d
+    }
+
+    /// Total seconds since midnight for sub-day comparison.
+    #[inline]
+    pub fn to_seconds_today(self) -> u32 {
+        self.hour as u32 * 3600 + self.minute as u32 * 60 + self.second as u32
+    }
+
+    /// Convert to a GameDate (drops sub-day precision) for backward compatibility.
+    #[inline]
+    pub fn to_date(self) -> GameDate {
+        GameDate { day: self.day, month: self.month, year: self.year }
+    }
+}
+
 /// Current game date (grand strategy: day/month/year).
+/// Kept for backward compatibility. Derived from `GameTime` at each tick.
 #[derive(Resource, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct GameDate {
     pub day: u16,
@@ -338,6 +504,8 @@ pub struct WorldBuilder {
     province_count: u32,
     nation_count: u32,
     map_kind: Option<MapKind>,
+    time_config: Option<TimeConfig>,
+    start_time: Option<GameTime>,
     enable_tags: bool,
     enable_character_gen: bool,
     enable_modifiers: bool,
@@ -345,6 +513,10 @@ pub struct WorldBuilder {
     enable_event_bus: bool,
     enable_progress_trees: bool,
     enable_armies: bool,
+    enable_economy: bool,
+    enable_diplomacy: bool,
+    combat_model: Option<crate::combat::CombatModel>,
+    enable_population: bool,
 }
 
 impl WorldBuilder {
@@ -353,6 +525,8 @@ impl WorldBuilder {
             province_count: 0,
             nation_count: 0,
             map_kind: None,
+            time_config: None,
+            start_time: None,
             enable_tags: false,
             enable_character_gen: false,
             enable_modifiers: false,
@@ -360,6 +534,10 @@ impl WorldBuilder {
             enable_event_bus: false,
             enable_progress_trees: false,
             enable_armies: false,
+            enable_economy: false,
+            enable_diplomacy: false,
+            combat_model: None,
+            enable_population: false,
         }
     }
 
@@ -455,12 +633,53 @@ impl WorldBuilder {
         self
     }
 
+    /// Enable the economy system (EconomyConfig, NationBudgets, GoodsRegistry, ProvinceEconomy).
+    pub fn with_economy(mut self) -> Self {
+        self.enable_economy = true;
+        self
+    }
+
+    /// Enable the diplomacy system (DiplomaticRelations, WarRegistry, DiplomacyConfig).
+    pub fn with_diplomacy(mut self) -> Self {
+        self.enable_diplomacy = true;
+        self
+    }
+
+    /// Enable combat with the specified model (UnitTypeRegistry, CombatResultLog, model-specific resources).
+    pub fn with_combat(mut self, model: crate::combat::CombatModel) -> Self {
+        self.combat_model = Some(model);
+        self.enable_armies = true; // Combat requires armies.
+        self
+    }
+
+    /// Enable the population system (ProvincePops, PopulationConfig).
+    pub fn with_population(mut self) -> Self {
+        self.enable_population = true;
+        self
+    }
+
+    /// Set the time configuration (tick granularity and schedule thresholds).
+    /// If not called, defaults to grand strategy (tick=Day, month/year thresholds).
+    pub fn time_config(mut self, config: TimeConfig) -> Self {
+        self.time_config = Some(config);
+        self
+    }
+
+    /// Set the simulation start time. Defaults to 1444-01-01 00:00:00.
+    pub fn start_time(mut self, time: GameTime) -> Self {
+        self.start_time = Some(time);
+        self
+    }
+
     pub fn build(self, world: &mut World) {
         world.insert_resource(WorldBounds {
             province_count: self.province_count,
             nation_count: self.nation_count,
         });
-        world.insert_resource(GameDate::default());
+        let time = self.start_time.unwrap_or_default();
+        world.insert_resource(time);
+        world.insert_resource(time.to_date());
+        world.insert_resource(self.time_config.unwrap_or_default());
         world.insert_resource(ProvinceStore {
             provinces: (0..self.province_count)
                 .map(|i| Province::default_for(ProvinceId(NonZeroU32::new(i + 1).unwrap())))
@@ -510,6 +729,46 @@ impl WorldBuilder {
         }
         if self.enable_armies {
             world.insert_resource(crate::armies::ArmyRegistry::new());
+        }
+        if self.enable_economy {
+            world.insert_resource(crate::economy::EconomyConfig::default());
+            world.insert_resource(crate::economy::NationBudgets::new(self.nation_count as usize));
+            world.insert_resource(crate::economy::GoodsRegistry::new());
+            world.insert_resource(crate::economy::ProvinceEconomy::new(self.province_count as usize));
+            world.insert_resource(crate::economy::TradeNetwork::new());
+        }
+        if self.enable_diplomacy {
+            world.insert_resource(crate::diplomacy::DiplomacyConfig::default());
+            world.insert_resource(crate::diplomacy::DiplomaticRelations::new(self.nation_count));
+            world.insert_resource(crate::diplomacy::WarRegistry::new());
+        }
+        if let Some(model) = self.combat_model {
+            // Insert model-specific resources based on the selected combat model.
+            match &model {
+                crate::combat::CombatModel::StackBased(config) => {
+                    world.insert_resource(config.clone());
+                    world.insert_resource(crate::combat::stack::ActiveStackBattles::default());
+                    world.insert_resource(crate::combat::stack::ActiveSieges::default());
+                }
+                crate::combat::CombatModel::OneUnitPerTile(config) => {
+                    world.insert_resource(config.clone());
+                }
+                crate::combat::CombatModel::Deployment(config) => {
+                    world.insert_resource(config.clone());
+                    world.insert_resource(crate::combat::deployment::ActiveDeploymentBattles::default());
+                }
+                crate::combat::CombatModel::TacticalGrid(config) => {
+                    world.insert_resource(config.clone());
+                    world.insert_resource(crate::combat::tactical::ActiveTacticalBattles::default());
+                }
+            }
+            world.insert_resource(model);
+            world.insert_resource(crate::combat::UnitTypeRegistry::new());
+            world.insert_resource(crate::combat::CombatResultLog::new());
+        }
+        if self.enable_population {
+            world.insert_resource(crate::population::PopulationConfig::default());
+            world.insert_resource(crate::population::ProvincePops::new(self.province_count as usize));
         }
     }
 }
