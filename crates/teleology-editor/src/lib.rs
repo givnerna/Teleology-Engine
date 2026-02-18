@@ -12,7 +12,7 @@ use teleology_core::{
     MapFile, MapKind, NationId, NationModifiers, NationStore, NationTags, ProgressState,
     ProgressTrees, ProvinceId, ProvinceModifiers, ProvinceStore, ProvinceTags, TagId, TagRegistry,
     TagTypeId, TickUnit, TimeConfig, Army, spawn_army, ActiveEvent, WorldBounds,
-    UiCommand, UiCommandBuffer,
+    UiCommand, UiCommandBuffer, UiPrefabRegistry,
 };
 use teleology_runtime::EngineContext;
 
@@ -3037,6 +3037,106 @@ impl EditorApp {
                 } else {
                     ui.label("Character generator in use.");
                 }
+            });
+
+            ui.separator();
+            ui.collapsing("UI Prefabs", |ui| {
+                let has_registry = world.get_resource::<UiPrefabRegistry>().is_some();
+                if !has_registry {
+                    if ui.button("Initialize prefab registry").clicked() {
+                        world.insert_resource(UiPrefabRegistry::new());
+                    }
+                    ui.label("Prefab registry initializes on first use (script API or button above).");
+                    return;
+                }
+
+                let prefab_count = world.get_resource::<UiPrefabRegistry>()
+                    .map(|r| r.prefabs.len()).unwrap_or(0);
+                ui.label(format!("Prefabs: {}", prefab_count));
+
+                // List all prefabs
+                let names: Vec<String> = world.get_resource::<UiPrefabRegistry>()
+                    .map(|r| r.names_sorted().into_iter().map(String::from).collect())
+                    .unwrap_or_default();
+
+                let mut to_delete: Option<String> = None;
+                let mut to_preview: Option<String> = None;
+                for name in &names {
+                    ui.horizontal(|ui| {
+                        ui.label(name);
+                        let cmd_count = world.get_resource::<UiPrefabRegistry>()
+                            .and_then(|r| r.get(name))
+                            .map(|p| p.commands.len())
+                            .unwrap_or(0);
+                        ui.label(
+                            egui::RichText::new(format!("({} cmds)", cmd_count))
+                                .small()
+                                .color(ui.visuals().weak_text_color()),
+                        );
+                        if ui.small_button("Preview").clicked() {
+                            to_preview = Some(name.clone());
+                        }
+                        if ui.small_button("Delete").clicked() {
+                            to_delete = Some(name.clone());
+                        }
+                    });
+                }
+                if let Some(name) = to_delete {
+                    if let Some(mut reg) = world.get_resource_mut::<UiPrefabRegistry>() {
+                        reg.remove(&name);
+                    }
+                }
+                // Preview: instantiate with empty params into the command buffer
+                if let Some(name) = to_preview {
+                    let expanded = world.get_resource::<UiPrefabRegistry>()
+                        .and_then(|r| r.get(&name).cloned())
+                        .map(|p| p.instantiate(&[]));
+                    if let Some(cmds) = expanded {
+                        if let Some(mut buf) = world.get_resource_mut::<UiCommandBuffer>() {
+                            for cmd in cmds {
+                                buf.commands.push(cmd);
+                            }
+                        }
+                    }
+                }
+
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        if ui.button("Save all…").clicked() {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .add_filter("JSON", &["json"])
+                                .set_file_name("ui_prefabs.json")
+                                .save_file()
+                            {
+                                if let Some(reg) = world.get_resource::<UiPrefabRegistry>() {
+                                    let _ = reg.save_to_file(&path);
+                                }
+                            }
+                        }
+                        if ui.button("Load all…").clicked() {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .add_filter("JSON", &["json"])
+                                .pick_file()
+                            {
+                                if let Ok(reg) = UiPrefabRegistry::load_from_file(&path) {
+                                    world.insert_resource(reg);
+                                }
+                            }
+                        }
+                        if ui.button("Load prefab…").clicked() {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .add_filter("JSON", &["json"])
+                                .pick_file()
+                            {
+                                if let Some(mut reg) = world.get_resource_mut::<UiPrefabRegistry>() {
+                                    let _ = reg.load_prefab(&path);
+                                }
+                            }
+                        }
+                    }
+                });
             });
         });
     }

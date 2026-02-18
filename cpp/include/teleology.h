@@ -149,6 +149,45 @@ void         teleology_ui_spacing(TeleologyEngine* engine, float amount);
 void         teleology_ui_set_color(TeleologyEngine* engine, uint8_t r, uint8_t g, uint8_t b, uint8_t a);
 void         teleology_ui_set_font_size(TeleologyEngine* engine, float size);
 
+/* --- UI Prefabs (reusable templates; record, instantiate, save/load) ---
+ *
+ * Record a prefab: call prefab_begin, then any teleology_ui_* calls (they go
+ * into the recording buffer instead of rendering), then prefab_end to save it.
+ * Text fields may contain {0}, {1}, … placeholders for substitution.
+ *
+ * Instantiate: prefab_instantiate replays the saved commands into the render
+ * buffer, substituting placeholders with the NUL-separated params string.
+ *
+ * Example:
+ *   // Record once (e.g. in on_init)
+ *   teleology_ui_prefab_begin(engine, "resource_bar");
+ *     teleology_ui_begin_horizontal(engine);
+ *       teleology_ui_label(engine, "{0}:");
+ *       teleology_ui_progress_bar(engine, 0.0f, "{1}", 200.0f);
+ *     teleology_ui_end_horizontal(engine);
+ *   teleology_ui_prefab_end(engine);
+ *
+ *   // Use every frame (in on_daily_tick)
+ *   teleology_ui_prefab_instantiate(engine, "resource_bar", "Gold\0""75%\0");
+ */
+
+/* Recording */
+void         teleology_ui_prefab_begin(TeleologyEngine* engine, const char* name);
+void         teleology_ui_prefab_end(TeleologyEngine* engine);
+
+/* Instantiation (params: NUL-separated, double-NUL-terminated) */
+uint8_t      teleology_ui_prefab_instantiate(TeleologyEngine* engine, const char* name, const char* params);
+
+/* Management */
+uint8_t      teleology_ui_prefab_delete(TeleologyEngine* engine, const char* name);
+uint32_t     teleology_ui_prefab_count(TeleologyEngine* engine);
+
+/* Persistence */
+uint8_t      teleology_ui_prefab_save(TeleologyEngine* engine, const char* name, const char* path);
+uint8_t      teleology_ui_prefab_load(TeleologyEngine* engine, const char* path);
+uint8_t      teleology_ui_prefab_save_all(TeleologyEngine* engine, const char* path);
+uint8_t      teleology_ui_prefab_load_all(TeleologyEngine* engine, const char* path);
+
 #ifdef __cplusplus
 }
 #endif

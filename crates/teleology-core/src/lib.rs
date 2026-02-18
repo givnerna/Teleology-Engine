@@ -52,7 +52,7 @@ pub use event_bus::{
     publish_event, EntityScopeRef, EventBus, EventEnvelope, EventPayload, EventScopeRef,
     EventTopicId, scope_types,
 };
-pub use game_ui::{UiCommand, UiCommandBuffer};
+pub use game_ui::{UiCommand, UiCommandBuffer, UiPrefab, UiPrefabRegistry};
 pub use population::{PopGroup, PopulationConfig, ProvincePops};
 pub use progress_trees::{
     NationProgress, NodeId, ProgressNode, ProgressState, ProgressTreeDefinition, ProgressTrees,

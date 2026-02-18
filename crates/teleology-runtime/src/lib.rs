@@ -13,7 +13,7 @@ use teleology_core::{
     GameDate, GameWorld, NationId, NationTags, ProvinceId, ProvinceStore, ProvinceTags,
     ProgressState, ProgressTrees, SimulationSchedule, TagId, TagRegistry, TagTypeId, WorldBuilder,
     WorldBounds, WorldSimulation,
-    UiCommand, UiCommandBuffer,
+    UiCommand, UiCommandBuffer, UiPrefabRegistry,
 };
 use teleology_script_api::{
     load_script_api, CArmyId, CGameDate, CGameTime, CNodeId, CNationId, CProvinceId, CTagId,
@@ -803,6 +803,200 @@ pub extern "C" fn teleology_ui_set_color(
 #[no_mangle]
 pub extern "C" fn teleology_ui_set_font_size(engine: *mut TeleologyEngine, size: f32) {
     push_ui_cmd(engine, UiCommand::SetFontSize { size });
+}
+
+// --- UI Prefabs (reusable templates; record, instantiate, save/load) ---
+
+fn ensure_prefab_registry(world: &mut GameWorld) {
+    if world.get_resource::<UiPrefabRegistry>().is_none() {
+        world.insert_resource(UiPrefabRegistry::new());
+    }
+}
+
+/// Begin recording UI commands into a named prefab. Subsequent teleology_ui_* calls
+/// go into the recording buffer instead of the render buffer, until prefab_end is called.
+#[no_mangle]
+pub extern "C" fn teleology_ui_prefab_begin(
+    engine: *mut TeleologyEngine,
+    name: *const std::ffi::c_char,
+) {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return };
+    let name = if name.is_null() {
+        return;
+    } else {
+        unsafe { CStr::from_ptr(name) }.to_string_lossy().into_owned()
+    };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_ui_buffer(world);
+    if let Some(mut buf) = world.get_resource_mut::<UiCommandBuffer>() {
+        buf.begin_recording(&name);
+    }
+}
+
+/// End recording and store the prefab in the registry.
+#[no_mangle]
+pub extern "C" fn teleology_ui_prefab_end(engine: *mut TeleologyEngine) {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_ui_buffer(world);
+    ensure_prefab_registry(world);
+    let prefab = {
+        let Some(mut buf) = world.get_resource_mut::<UiCommandBuffer>() else { return };
+        buf.end_recording()
+    };
+    if let Some(prefab) = prefab {
+        if let Some(mut reg) = world.get_resource_mut::<UiPrefabRegistry>() {
+            reg.insert(prefab);
+        }
+    }
+}
+
+/// Instantiate a prefab by name, expanding placeholder parameters into the render buffer.
+/// params is a NUL-separated, double-NUL-terminated string: "Gold\0100\0\0"
+/// Returns 1 on success, 0 if prefab not found.
+#[no_mangle]
+pub extern "C" fn teleology_ui_prefab_instantiate(
+    engine: *mut TeleologyEngine,
+    name: *const std::ffi::c_char,
+    params: *const std::ffi::c_char,
+) -> u8 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0 };
+    let name = if name.is_null() {
+        return 0;
+    } else {
+        unsafe { CStr::from_ptr(name) }.to_string_lossy().into_owned()
+    };
+    // Parse NUL-separated params
+    let param_strs: Vec<String> = if params.is_null() {
+        Vec::new()
+    } else {
+        let mut result = Vec::new();
+        let mut ptr = params;
+        loop {
+            let s = unsafe { CStr::from_ptr(ptr) };
+            let bytes = s.to_bytes();
+            if bytes.is_empty() {
+                break;
+            }
+            result.push(s.to_string_lossy().into_owned());
+            ptr = unsafe { ptr.add(bytes.len() + 1) }; // skip past NUL
+        }
+        result
+    };
+    let param_refs: Vec<&str> = param_strs.iter().map(String::as_str).collect();
+
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_prefab_registry(world);
+    ensure_ui_buffer(world);
+
+    let expanded = {
+        let Some(reg) = world.get_resource::<UiPrefabRegistry>() else { return 0 };
+        let Some(prefab) = reg.get(&name) else { return 0 };
+        prefab.instantiate(&param_refs)
+    };
+    if let Some(mut buf) = world.get_resource_mut::<UiCommandBuffer>() {
+        for cmd in expanded {
+            buf.push(cmd);
+        }
+    }
+    1
+}
+
+/// Delete a prefab from the registry by name. Returns 1 if removed, 0 if not found.
+#[no_mangle]
+pub extern "C" fn teleology_ui_prefab_delete(
+    engine: *mut TeleologyEngine,
+    name: *const std::ffi::c_char,
+) -> u8 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0 };
+    let name = if name.is_null() {
+        return 0;
+    } else {
+        unsafe { CStr::from_ptr(name) }.to_string_lossy().into_owned()
+    };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_prefab_registry(world);
+    let Some(mut reg) = world.get_resource_mut::<UiPrefabRegistry>() else { return 0 };
+    if reg.remove(&name).is_some() { 1 } else { 0 }
+}
+
+/// Save a single prefab to a JSON file. Returns 1 on success, 0 on failure.
+#[no_mangle]
+pub extern "C" fn teleology_ui_prefab_save(
+    engine: *mut TeleologyEngine,
+    name: *const std::ffi::c_char,
+    path: *const std::ffi::c_char,
+) -> u8 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0 };
+    let name = if name.is_null() { return 0 } else {
+        unsafe { CStr::from_ptr(name) }.to_string_lossy().into_owned()
+    };
+    let path = if path.is_null() { return 0 } else {
+        unsafe { CStr::from_ptr(path) }.to_string_lossy().into_owned()
+    };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_prefab_registry(world);
+    let Some(reg) = world.get_resource::<UiPrefabRegistry>() else { return 0 };
+    if reg.save_prefab(&name, std::path::Path::new(&path)).is_ok() { 1 } else { 0 }
+}
+
+/// Load a prefab from a JSON file into the registry. Returns 1 on success, 0 on failure.
+#[no_mangle]
+pub extern "C" fn teleology_ui_prefab_load(
+    engine: *mut TeleologyEngine,
+    path: *const std::ffi::c_char,
+) -> u8 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0 };
+    let path = if path.is_null() { return 0 } else {
+        unsafe { CStr::from_ptr(path) }.to_string_lossy().into_owned()
+    };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_prefab_registry(world);
+    let Some(mut reg) = world.get_resource_mut::<UiPrefabRegistry>() else { return 0 };
+    if reg.load_prefab(std::path::Path::new(&path)).is_ok() { 1 } else { 0 }
+}
+
+/// Save all prefabs to a single JSON file. Returns 1 on success, 0 on failure.
+#[no_mangle]
+pub extern "C" fn teleology_ui_prefab_save_all(
+    engine: *mut TeleologyEngine,
+    path: *const std::ffi::c_char,
+) -> u8 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0 };
+    let path = if path.is_null() { return 0 } else {
+        unsafe { CStr::from_ptr(path) }.to_string_lossy().into_owned()
+    };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_prefab_registry(world);
+    let Some(reg) = world.get_resource::<UiPrefabRegistry>() else { return 0 };
+    if reg.save_to_file(std::path::Path::new(&path)).is_ok() { 1 } else { 0 }
+}
+
+/// Load all prefabs from a JSON file (replaces registry). Returns 1 on success, 0 on failure.
+#[no_mangle]
+pub extern "C" fn teleology_ui_prefab_load_all(
+    engine: *mut TeleologyEngine,
+    path: *const std::ffi::c_char,
+) -> u8 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0 };
+    let path = if path.is_null() { return 0 } else {
+        unsafe { CStr::from_ptr(path) }.to_string_lossy().into_owned()
+    };
+    let world = unsafe { &mut *ctx.world.get() };
+    match UiPrefabRegistry::load_from_file(std::path::Path::new(&path)) {
+        Ok(reg) => { world.insert_resource(reg); 1 }
+        Err(_) => 0,
+    }
+}
+
+/// Get the number of prefabs in the registry.
+#[no_mangle]
+pub extern "C" fn teleology_ui_prefab_count(engine: *mut TeleologyEngine) -> u32 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0 };
+    let world = unsafe { &*ctx.world.get() };
+    world.get_resource::<UiPrefabRegistry>()
+        .map(|r| r.prefabs.len() as u32)
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
