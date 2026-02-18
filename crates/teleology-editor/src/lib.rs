@@ -216,6 +216,41 @@ fn panel_header(ui: &mut egui::Ui, title: &str) {
     ui.add_space(4.0);
 }
 
+/// Scan `resources/{subdir}` for files matching any of the given extensions.
+fn scan_resource_dir(subdir: &str, extensions: &[&str]) -> Vec<std::path::PathBuf> {
+    let dir = std::path::PathBuf::from("resources").join(subdir);
+    let Ok(entries) = std::fs::read_dir(&dir) else { return Vec::new() };
+    let mut files: Vec<std::path::PathBuf> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| extensions.iter().any(|e| e.eq_ignore_ascii_case(ext)))
+                .unwrap_or(false)
+        })
+        .collect();
+    files.sort();
+    files
+}
+
+/// Load an image file into an egui texture.
+fn load_image_texture(
+    ctx: &egui::Context,
+    path: &std::path::Path,
+) -> Option<egui::TextureHandle> {
+    let data = std::fs::read(path).ok()?;
+    let img = image::load_from_memory(&data).ok()?.to_rgba8();
+    let (w, h) = img.dimensions();
+    let pixels = img.into_raw();
+    let color_image = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &pixels);
+    Some(ctx.load_texture(
+        path.display().to_string(),
+        color_image,
+        egui::TextureOptions::LINEAR,
+    ))
+}
+
 pub struct EditorApp {
     pub engine: EngineContext,
     pub mode: EditorMode,
@@ -236,7 +271,6 @@ pub struct EditorApp {
     event_topic_input: String,
     event_payload_input: String,
     audio_path_input: String,
-    video_path_input: String,
 
     // --- Graph editor state (events / progress trees) ---
     event_graph_pan: egui::Vec2,
@@ -274,6 +308,18 @@ pub struct EditorApp {
     brush_radius: u32,
     /// Show province/nation name labels on the map.
     show_map_names: bool,
+
+    // --- Media browser state ---
+    /// Cached list of audio files in resources/audio/.
+    audio_files: Vec<std::path::PathBuf>,
+    /// Cached list of image files in resources/assets/.
+    image_files: Vec<std::path::PathBuf>,
+    /// Selected audio file index.
+    media_selected_audio: Option<usize>,
+    /// Selected image file index.
+    media_selected_image: Option<usize>,
+    /// Cached image textures (path string → texture handle).
+    media_textures: std::collections::HashMap<std::path::PathBuf, egui::TextureHandle>,
 }
 
 impl EditorApp {
@@ -298,7 +344,6 @@ impl EditorApp {
             event_topic_input: "demo_event".to_string(),
             event_payload_input: "hello".to_string(),
             audio_path_input: String::new(),
-            video_path_input: String::new(),
 
             event_graph_pan: egui::Vec2::new(20.0, 20.0),
             event_graph_pos: std::collections::HashMap::new(),
@@ -322,6 +367,11 @@ impl EditorApp {
             map_pan: egui::Vec2::ZERO,
             brush_radius: 0,
             show_map_names: false,
+            audio_files: scan_resource_dir("audio", &["mp3", "ogg", "wav", "flac", "aac"]),
+            image_files: scan_resource_dir("assets", &["png", "jpg", "jpeg", "bmp", "webp"]),
+            media_selected_audio: None,
+            media_selected_image: None,
+            media_textures: std::collections::HashMap::new(),
         }
     }
 }
@@ -662,94 +712,208 @@ impl EditorApp {
     }
 
     fn ui_media(&mut self, ctx: &egui::Context) {
+        // --- Left panel: file browser for audio + images ---
+        egui::SidePanel::left("media_browser")
+            .default_width(280.0)
+            .resizable(true)
+            .frame(panel_frame())
+            .show(ctx, |ui| {
+                panel_header(ui, "Browser");
+                ui.add_space(4.0);
+
+                if ui.button("Refresh").on_hover_text("Re-scan resources/audio and resources/assets").clicked() {
+                    self.audio_files = scan_resource_dir("audio", &["mp3", "ogg", "wav", "flac", "aac"]);
+                    self.image_files = scan_resource_dir("assets", &["png", "jpg", "jpeg", "bmp", "webp"]);
+                }
+                ui.add_space(6.0);
+
+                // ---- Audio files ----
+                ui.strong("Audio");
+                ui.label(
+                    egui::RichText::new("resources/audio/")
+                        .small()
+                        .color(ui.visuals().weak_text_color()),
+                );
+                ui.add_space(4.0);
+                if self.audio_files.is_empty() {
+                    ui.label(
+                        egui::RichText::new("No audio files. Place .mp3/.ogg/.wav/.flac files in resources/audio/")
+                            .small()
+                            .color(ui.visuals().weak_text_color()),
+                    );
+                } else {
+                    egui::ScrollArea::vertical()
+                        .id_salt("audio_list")
+                        .max_height(200.0)
+                        .show(ui, |ui| {
+                            for (i, path) in self.audio_files.iter().enumerate() {
+                                let name = path.file_name().unwrap_or_default().to_string_lossy();
+                                let selected = self.media_selected_audio == Some(i);
+                                if ui.selectable_label(selected, name.as_ref()).clicked() {
+                                    self.media_selected_audio = Some(i);
+                                    self.audio_path_input = path.display().to_string();
+                                }
+                            }
+                        });
+                }
+
+                ui.add_space(10.0);
+                ui.separator();
+                ui.add_space(10.0);
+
+                // ---- Image files ----
+                ui.strong("Images");
+                ui.label(
+                    egui::RichText::new("resources/assets/")
+                        .small()
+                        .color(ui.visuals().weak_text_color()),
+                );
+                ui.add_space(4.0);
+                if self.image_files.is_empty() {
+                    ui.label(
+                        egui::RichText::new("No image files. Place .png/.jpg/.bmp/.webp files in resources/assets/")
+                            .small()
+                            .color(ui.visuals().weak_text_color()),
+                    );
+                } else {
+                    egui::ScrollArea::vertical()
+                        .id_salt("image_list")
+                        .auto_shrink([false; 2])
+                        .show(ui, |ui| {
+                            for (i, path) in self.image_files.iter().enumerate() {
+                                let name = path.file_name().unwrap_or_default().to_string_lossy();
+                                let selected = self.media_selected_image == Some(i);
+                                if ui.selectable_label(selected, name.as_ref()).clicked() {
+                                    self.media_selected_image = Some(i);
+                                }
+                            }
+                        });
+                }
+            });
+
+        // --- Center panel: preview / controls ---
         egui::CentralPanel::default()
             .frame(panel_frame())
             .show(ctx, |ui| {
-                panel_header(ui, "Media");
-                ui.heading("Media");
-            ui.add_space(8.0);
+                panel_header(ui, "Preview");
+                ui.add_space(8.0);
 
-            ui.group(|ui| {
-                ui.strong("Audio (native)");
-                ui.label(
-                    egui::RichText::new("Basic playback via kira. Works on desktop; no-op on wasm.")
-                        .small()
-                        .color(ui.visuals().weak_text_color()),
-                );
-                ui.add_space(6.0);
+                // ---- Audio controls ----
+                ui.group(|ui| {
+                    ui.strong("Audio");
+                    ui.add_space(4.0);
 
-                ui.horizontal(|ui| {
-                    ui.label("File:");
-                    ui.text_edit_singleline(&mut self.audio_path_input);
-                    #[cfg(not(target_arch = "wasm32"))]
-                    if ui.button("Pick").clicked() {
-                        if let Some(path) = rfd::FileDialog::new().pick_file() {
-                            self.audio_path_input = path.display().to_string();
-                        }
-                    }
-                });
-
-                ui.horizontal(|ui| {
-                    if ui.button("Play once").clicked() {
-                        let p = std::path::PathBuf::from(self.audio_path_input.trim());
-                        let _ = self.engine.audio_play_file(&p, false, 0.8);
-                    }
-                    if ui.button("Loop").clicked() {
-                        let p = std::path::PathBuf::from(self.audio_path_input.trim());
-                        let _ = self.engine.audio_play_file(&p, true, 0.6);
-                    }
-                    if ui.button("Volume 100%").clicked() {
-                        self.engine.audio_set_master_volume(1.0);
-                    }
-                    if ui.button("Volume 50%").clicked() {
-                        self.engine.audio_set_master_volume(0.5);
-                    }
-                });
-            });
-
-            ui.add_space(12.0);
-            ui.separator();
-            ui.add_space(12.0);
-
-            ui.group(|ui| {
-                ui.strong("Video (cutscene player)");
-                ui.label(
-                    egui::RichText::new("MP4/H.264 decoding is feature-gated behind `teleology-runtime` feature `video_ffmpeg`.")
-                        .small()
-                        .color(ui.visuals().weak_text_color()),
-                );
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    ui.label("File:");
-                    ui.text_edit_singleline(&mut self.video_path_input);
-                    #[cfg(not(target_arch = "wasm32"))]
-                    if ui.button("Pick").clicked() {
-                        if let Some(path) = rfd::FileDialog::new()
-                            .add_filter("Video", &["mp4", "m4v", "mov"])
-                            .pick_file()
-                        {
-                            self.video_path_input = path.display().to_string();
-                        }
-                    }
-                });
-                ui.horizontal(|ui| {
-                    if ui.button("Open").clicked() {
-                        let p = std::path::PathBuf::from(self.video_path_input.trim());
-                        let ok = self.engine.video_open(&p);
-                        if !ok {
+                    if let Some(idx) = self.media_selected_audio {
+                        if let Some(path) = self.audio_files.get(idx) {
+                            let name = path.file_name().unwrap_or_default().to_string_lossy();
+                            ui.label(format!("Selected: {}", name));
                             ui.label(
-                                egui::RichText::new("Open failed (likely missing `video_ffmpeg` feature or FFmpeg).")
-                                    .color(ui.visuals().error_fg_color),
+                                egui::RichText::new(path.display().to_string())
+                                    .small()
+                                    .color(ui.visuals().weak_text_color()),
                             );
+                            ui.add_space(4.0);
+                            ui.horizontal(|ui| {
+                                if ui.button("Play").clicked() {
+                                    let _ = self.engine.audio_play_file(path, false, 0.8);
+                                }
+                                if ui.button("Loop").clicked() {
+                                    let _ = self.engine.audio_play_file(path, true, 0.6);
+                                }
+                                ui.separator();
+                                if ui.button("Vol 100%").clicked() {
+                                    self.engine.audio_set_master_volume(1.0);
+                                }
+                                if ui.button("Vol 50%").clicked() {
+                                    self.engine.audio_set_master_volume(0.5);
+                                }
+                            });
                         }
+                    } else {
+                        ui.label(
+                            egui::RichText::new("Select an audio file from the browser.")
+                                .small()
+                                .color(ui.visuals().weak_text_color()),
+                        );
                     }
-                    if ui.button("Poll frame").clicked() {
-                        let _ = self.engine.video_poll_frame();
+
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.label("Custom path:");
+                        ui.text_edit_singleline(&mut self.audio_path_input);
+                        #[cfg(not(target_arch = "wasm32"))]
+                        if ui.small_button("Pick").clicked() {
+                            if let Some(path) = rfd::FileDialog::new().pick_file() {
+                                self.audio_path_input = path.display().to_string();
+                            }
+                        }
+                        if ui.small_button("Play").clicked() {
+                            let p = std::path::PathBuf::from(self.audio_path_input.trim());
+                            let _ = self.engine.audio_play_file(&p, false, 0.8);
+                        }
+                    });
+                });
+
+                ui.add_space(12.0);
+                ui.separator();
+                ui.add_space(12.0);
+
+                // ---- Image preview ----
+                ui.group(|ui| {
+                    ui.strong("Image Preview");
+                    ui.add_space(4.0);
+
+                    if let Some(idx) = self.media_selected_image {
+                        if let Some(path) = self.image_files.get(idx).cloned() {
+                            let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                            ui.label(format!("Selected: {}", name));
+                            ui.label(
+                                egui::RichText::new(path.display().to_string())
+                                    .small()
+                                    .color(ui.visuals().weak_text_color()),
+                            );
+                            ui.add_space(6.0);
+
+                            // Load texture on demand, cache it
+                            if !self.media_textures.contains_key(&path) {
+                                if let Some(tex) = load_image_texture(ctx, &path) {
+                                    self.media_textures.insert(path.clone(), tex);
+                                }
+                            }
+                            if let Some(tex) = self.media_textures.get(&path) {
+                                let img_size = tex.size_vec2();
+                                let available = ui.available_size();
+                                let scale = (available.x / img_size.x)
+                                    .min(available.y / img_size.y)
+                                    .min(1.0);
+                                let display_size = img_size * scale;
+                                ui.image(egui::load::SizedTexture::new(tex.id(), display_size));
+                                ui.add_space(4.0);
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "{}x{} px",
+                                        img_size.x as u32,
+                                        img_size.y as u32
+                                    ))
+                                    .small()
+                                    .color(ui.visuals().weak_text_color()),
+                                );
+                            } else {
+                                ui.label(
+                                    egui::RichText::new("Failed to load image.")
+                                        .color(ui.visuals().error_fg_color),
+                                );
+                            }
+                        }
+                    } else {
+                        ui.label(
+                            egui::RichText::new("Select an image file from the browser.")
+                                .small()
+                                .color(ui.visuals().weak_text_color()),
+                        );
                     }
                 });
-                ui.label("Frame rendering to texture will appear once decoding is implemented (FFmpeg path is currently a stub).");
             });
-        });
     }
 
     fn ui_events_editor(&mut self, ctx: &egui::Context) {
