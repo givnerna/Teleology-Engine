@@ -20,7 +20,7 @@ pub trait ScopeId: Clone + Copy + PartialEq + Eq + std::hash::Hash + Send + Sync
 }
 
 /// Stable id for a province (map slot). Dense index into province arrays.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ProvinceId(pub NonZeroU32);
 
 impl ProvinceId {
@@ -513,6 +513,10 @@ pub struct WorldBuilder {
     enable_event_bus: bool,
     enable_progress_trees: bool,
     enable_armies: bool,
+    enable_economy: bool,
+    enable_diplomacy: bool,
+    combat_model: Option<crate::combat::CombatModel>,
+    enable_population: bool,
 }
 
 impl WorldBuilder {
@@ -530,6 +534,10 @@ impl WorldBuilder {
             enable_event_bus: false,
             enable_progress_trees: false,
             enable_armies: false,
+            enable_economy: false,
+            enable_diplomacy: false,
+            combat_model: None,
+            enable_population: false,
         }
     }
 
@@ -625,6 +633,31 @@ impl WorldBuilder {
         self
     }
 
+    /// Enable the economy system (EconomyConfig, NationBudgets, GoodsRegistry, ProvinceEconomy).
+    pub fn with_economy(mut self) -> Self {
+        self.enable_economy = true;
+        self
+    }
+
+    /// Enable the diplomacy system (DiplomaticRelations, WarRegistry, DiplomacyConfig).
+    pub fn with_diplomacy(mut self) -> Self {
+        self.enable_diplomacy = true;
+        self
+    }
+
+    /// Enable combat with the specified model (UnitTypeRegistry, CombatResultLog, model-specific resources).
+    pub fn with_combat(mut self, model: crate::combat::CombatModel) -> Self {
+        self.combat_model = Some(model);
+        self.enable_armies = true; // Combat requires armies.
+        self
+    }
+
+    /// Enable the population system (ProvincePops, PopulationConfig).
+    pub fn with_population(mut self) -> Self {
+        self.enable_population = true;
+        self
+    }
+
     /// Set the time configuration (tick granularity and schedule thresholds).
     /// If not called, defaults to grand strategy (tick=Day, month/year thresholds).
     pub fn time_config(mut self, config: TimeConfig) -> Self {
@@ -696,6 +729,46 @@ impl WorldBuilder {
         }
         if self.enable_armies {
             world.insert_resource(crate::armies::ArmyRegistry::new());
+        }
+        if self.enable_economy {
+            world.insert_resource(crate::economy::EconomyConfig::default());
+            world.insert_resource(crate::economy::NationBudgets::new(self.nation_count as usize));
+            world.insert_resource(crate::economy::GoodsRegistry::new());
+            world.insert_resource(crate::economy::ProvinceEconomy::new(self.province_count as usize));
+            world.insert_resource(crate::economy::TradeNetwork::new());
+        }
+        if self.enable_diplomacy {
+            world.insert_resource(crate::diplomacy::DiplomacyConfig::default());
+            world.insert_resource(crate::diplomacy::DiplomaticRelations::new(self.nation_count));
+            world.insert_resource(crate::diplomacy::WarRegistry::new());
+        }
+        if let Some(model) = self.combat_model {
+            // Insert model-specific resources based on the selected combat model.
+            match &model {
+                crate::combat::CombatModel::StackBased(config) => {
+                    world.insert_resource(config.clone());
+                    world.insert_resource(crate::combat::stack::ActiveStackBattles::default());
+                    world.insert_resource(crate::combat::stack::ActiveSieges::default());
+                }
+                crate::combat::CombatModel::OneUnitPerTile(config) => {
+                    world.insert_resource(config.clone());
+                }
+                crate::combat::CombatModel::Deployment(config) => {
+                    world.insert_resource(config.clone());
+                    world.insert_resource(crate::combat::deployment::ActiveDeploymentBattles::default());
+                }
+                crate::combat::CombatModel::TacticalGrid(config) => {
+                    world.insert_resource(config.clone());
+                    world.insert_resource(crate::combat::tactical::ActiveTacticalBattles::default());
+                }
+            }
+            world.insert_resource(model);
+            world.insert_resource(crate::combat::UnitTypeRegistry::new());
+            world.insert_resource(crate::combat::CombatResultLog::new());
+        }
+        if self.enable_population {
+            world.insert_resource(crate::population::PopulationConfig::default());
+            world.insert_resource(crate::population::ProvincePops::new(self.province_count as usize));
         }
     }
 }

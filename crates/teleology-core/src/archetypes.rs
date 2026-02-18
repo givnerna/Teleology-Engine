@@ -17,6 +17,8 @@ pub const TERRAIN_SEA: u8 = 1;
 pub struct Province {
     pub id: ProvinceId,
     pub owner: Option<NationId>,
+    /// Occupier during wartime (different from owner). None if not occupied.
+    pub occupation: Option<NationId>,
     /// Terrain: TERRAIN_LAND (0), TERRAIN_SEA (1), or custom.
     pub terrain: u8,
     pub development: [u16; 3], // tax, production, manpower
@@ -28,6 +30,7 @@ impl Province {
         Self {
             id,
             owner: None,
+            occupation: None,
             terrain: TERRAIN_LAND,
             development: [1, 1, 1],
             population: 0,
@@ -49,6 +52,8 @@ pub struct Nation {
     pub stability: i8,
     pub treasury: i64,
     pub manpower: u32,
+    /// War exhaustion: 0.0 = fresh, 100.0 = exhausted.
+    pub war_exhaustion: f32,
 }
 
 impl Nation {
@@ -60,6 +65,7 @@ impl Nation {
             stability: 0,
             treasury: 0,
             manpower: 0,
+            war_exhaustion: 0.0,
         }
     }
 }

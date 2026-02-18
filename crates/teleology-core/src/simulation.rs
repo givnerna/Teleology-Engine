@@ -157,15 +157,78 @@ impl SimulationSchedule {
         let mut daily = Schedule::new(DailySchedule);
         daily.set_executor_kind(ExecutorKind::MultiThreaded);
         daily.add_systems(system_daily_province_tick);
-        world.add_schedule(daily);
 
         let mut monthly = Schedule::new(MonthlySchedule);
         monthly.set_executor_kind(ExecutorKind::MultiThreaded);
         monthly.add_systems(system_monthly_income);
-        world.add_schedule(monthly);
 
         let mut yearly = Schedule::new(YearlySchedule);
         yearly.set_executor_kind(ExecutorKind::MultiThreaded);
+
+        // Economy systems (secondary tick = monthly).
+        if world.get_resource::<crate::economy::EconomyConfig>().is_some() {
+            monthly.add_systems((
+                crate::economy::system_economy_collect_taxes,
+                crate::economy::system_economy_expenses,
+            ));
+            monthly.add_systems(crate::economy::system_economy_balance);
+            monthly.add_systems(crate::economy::system_economy_manpower);
+        }
+
+        // Diplomacy systems (secondary tick = monthly).
+        if world.get_resource::<crate::diplomacy::DiplomacyConfig>().is_some() {
+            monthly.add_systems((
+                crate::diplomacy::system_diplomacy_opinion_tick,
+                crate::diplomacy::system_diplomacy_truce_expiry,
+                crate::diplomacy::system_diplomacy_war_score,
+            ));
+        }
+
+        // Combat systems (registered based on active combat model).
+        if let Some(model) = world.get_resource::<crate::combat::CombatModel>() {
+            match model.clone() {
+                crate::combat::CombatModel::StackBased(_) => {
+                    daily.add_systems((
+                        crate::combat::stack::system_stack_detect_battles,
+                        crate::combat::stack::system_stack_resolve_battles,
+                        crate::combat::stack::system_stack_siege_tick,
+                        crate::combat::stack::system_stack_army_movement,
+                        crate::combat::stack::system_stack_org_recovery,
+                    ));
+                }
+                crate::combat::CombatModel::OneUnitPerTile(_) => {
+                    daily.add_systems((
+                        crate::combat::tile::system_tile_enforce_1upt,
+                        crate::combat::tile::system_tile_movement,
+                        crate::combat::tile::system_tile_reset_movement,
+                    ));
+                }
+                crate::combat::CombatModel::Deployment(_) => {
+                    daily.add_systems((
+                        crate::combat::deployment::system_deployment_initiate,
+                        crate::combat::deployment::system_deployment_resolve_round,
+                    ));
+                }
+                crate::combat::CombatModel::TacticalGrid(_) => {
+                    daily.add_systems((
+                        crate::combat::tactical::system_tactical_create_grid,
+                        crate::combat::tactical::system_tactical_tick,
+                    ));
+                }
+            }
+        }
+
+        // Population systems (secondary tick = monthly).
+        if world.get_resource::<crate::population::PopulationConfig>().is_some() {
+            monthly.add_systems((
+                crate::population::system_pop_growth,
+                crate::population::system_pop_unrest,
+                crate::population::system_pop_assimilation,
+            ));
+        }
+
+        world.add_schedule(daily);
+        world.add_schedule(monthly);
         world.add_schedule(yearly);
     }
 }

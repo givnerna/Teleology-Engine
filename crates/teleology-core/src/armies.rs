@@ -50,7 +50,7 @@ pub struct ArmyCommander {
 }
 
 /// Simple state machine for armies.
-#[derive(Component, Clone, Copy, Serialize, Deserialize)]
+#[derive(Component, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ArmyStatus {
     Idle,
     Marching { to: ProvinceId },
