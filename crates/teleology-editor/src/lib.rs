@@ -235,6 +235,144 @@ fn scan_resource_dir(subdir: &str, extensions: &[&str]) -> Vec<std::path::PathBu
     files
 }
 
+/// File type category for resource browser icons.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FileKind {
+    Folder,
+    Image,
+    Audio,
+    Font,
+    Script,
+    Map,
+    Json,
+    Prefab,
+    Other,
+}
+
+impl FileKind {
+    fn from_path(path: &std::path::Path) -> Self {
+        if path.is_dir() {
+            return FileKind::Folder;
+        }
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        match ext.as_str() {
+            "png" | "jpg" | "jpeg" | "bmp" | "webp" | "gif" | "tga" => FileKind::Image,
+            "mp3" | "ogg" | "wav" | "flac" | "aac" => FileKind::Audio,
+            "ttf" | "otf" => FileKind::Font,
+            "cpp" | "c" | "h" | "hpp" | "rs" | "lua" | "py" => FileKind::Script,
+            "tmap" => FileKind::Map,
+            "json" => {
+                // Check if filename hints at prefab
+                let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                if stem.contains("prefab") {
+                    FileKind::Prefab
+                } else {
+                    FileKind::Json
+                }
+            }
+            _ => FileKind::Other,
+        }
+    }
+
+    fn icon(self) -> &'static str {
+        match self {
+            FileKind::Folder => "\u{1F4C1}",  // 📁
+            FileKind::Image => "\u{1F5BC}",    // 🖼
+            FileKind::Audio => "\u{1F3B5}",    // 🎵
+            FileKind::Font => "\u{1F524}",     // 🔤
+            FileKind::Script => "\u{1F4DC}",   // 📜
+            FileKind::Map => "\u{1F5FA}",      // 🗺
+            FileKind::Json => "\u{2699}",      // ⚙
+            FileKind::Prefab => "\u{1F9E9}",   // 🧩
+            FileKind::Other => "\u{1F4C4}",    // 📄
+        }
+    }
+
+    fn color(self) -> egui::Color32 {
+        match self {
+            FileKind::Folder => egui::Color32::from_rgb(220, 190, 100),
+            FileKind::Image => egui::Color32::from_rgb(120, 200, 120),
+            FileKind::Audio => egui::Color32::from_rgb(120, 160, 220),
+            FileKind::Font => egui::Color32::from_rgb(200, 140, 200),
+            FileKind::Script => egui::Color32::from_rgb(220, 180, 100),
+            FileKind::Map => egui::Color32::from_rgb(100, 200, 180),
+            FileKind::Json => egui::Color32::from_rgb(180, 180, 180),
+            FileKind::Prefab => egui::Color32::from_rgb(180, 120, 220),
+            FileKind::Other => egui::Color32::from_rgb(150, 150, 150),
+        }
+    }
+}
+
+/// One entry in the resource browser.
+#[derive(Clone)]
+struct ResourceEntry {
+    path: std::path::PathBuf,
+    name: String,
+    kind: FileKind,
+    size: u64,
+}
+
+/// Scan a directory for the resource browser (folders + all files).
+fn scan_directory(dir: &std::path::Path) -> Vec<ResourceEntry> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut result: Vec<ResourceEntry> = entries
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let path = e.path();
+            let name = path.file_name()?.to_string_lossy().to_string();
+            // Skip hidden files
+            if name.starts_with('.') {
+                return None;
+            }
+            let kind = FileKind::from_path(&path);
+            let size = e.metadata().map(|m| m.len()).unwrap_or(0);
+            Some(ResourceEntry { path, name, kind, size })
+        })
+        .collect();
+    // Folders first, then files, alphabetical within each group
+    result.sort_by(|a, b| {
+        let a_dir = a.kind == FileKind::Folder;
+        let b_dir = b.kind == FileKind::Folder;
+        b_dir.cmp(&a_dir).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    result
+}
+
+/// Recursively collect all directories under `root` (including `root` itself).
+fn collect_folders(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut result = vec![root.to_path_buf()];
+    if let Ok(entries) = std::fs::read_dir(root) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if path.is_dir() {
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if !name.starts_with('.') {
+                    result.extend(collect_folders(&path));
+                }
+            }
+        }
+    }
+    result.sort();
+    result
+}
+
+/// Format file size for display.
+fn format_size(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{} B", bytes)
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
+
 /// Load an image file into an egui texture.
 fn load_image_texture(
     ctx: &egui::Context,
@@ -374,6 +512,22 @@ pub struct EditorApp {
     loaded_font_families: Vec<String>,
     /// Preview text for font preview.
     font_preview_text: String,
+
+    // --- Resource browser (Unity-style Project panel) ---
+    /// Currently browsed directory (relative to project root).
+    project_dir: std::path::PathBuf,
+    /// Cached entries in the current directory.
+    project_entries: Vec<ResourceEntry>,
+    /// Selected entry index.
+    project_selected: Option<usize>,
+    /// Grid tile size (px).
+    project_tile_size: f32,
+    /// Whether the resource browser has been scanned at least once.
+    project_scanned: bool,
+    /// Thumbnail cache: path → texture handle (for image files).
+    project_thumbnails: std::collections::HashMap<std::path::PathBuf, egui::TextureHandle>,
+    /// Folder tree: all directories under resources/ (cached on scan).
+    project_folders: Vec<std::path::PathBuf>,
 }
 
 impl EditorApp {
@@ -431,6 +585,14 @@ impl EditorApp {
             media_selected_font: None,
             loaded_font_families,
             font_preview_text: "The quick brown fox jumps over the lazy dog.\n0123456789 !@#$%^&*()".to_string(),
+
+            project_dir: std::path::PathBuf::from("resources"),
+            project_entries: Vec::new(),
+            project_selected: None,
+            project_tile_size: 72.0,
+            project_scanned: false,
+            project_thumbnails: std::collections::HashMap::new(),
+            project_folders: Vec::new(),
         }
     }
 }
@@ -620,29 +782,8 @@ impl eframe::App for EditorApp {
         // --- Script game UI (immediate-mode command buffer) ---
         self.render_game_ui(ctx);
 
-        // --- Bottom panel: Project / Console (Unity-style) ---
-        egui::TopBottomPanel::bottom("project_console")
-            .frame(panel_frame())
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.style_mut().spacing.item_spacing.x = 8.0;
-                    ui.strong("Project");
-                ui.separator();
-                #[cfg(not(target_arch = "wasm32"))]
-                {
-                    ui.label("Script:");
-                    ui.add(egui::TextEdit::singleline(&mut self.script_path_input).desired_width(280.0));
-                    if ui.button("Load").clicked() {
-                        let path = PathBuf::from(self.script_path_input.trim());
-                        if path.exists() { let _ = self.engine.load_script(&path); }
-                    }
-                    ui.checkbox(&mut self.hot_reload, "Hot reload");
-                    self.engine.set_hot_reload(self.hot_reload);
-                }
-                #[cfg(target_arch = "wasm32")]
-                ui.label("WebGL │ script on desktop");
-            });
-        });
+        // --- Bottom panel: Resource Browser (Unity-style Project panel) ---
+        self.ui_project_browser(ctx);
     }
 }
 
@@ -1008,6 +1149,322 @@ impl EditorApp {
                 UiCommand::EndWindow => { i += 1; }
             }
         }
+    }
+
+    /// Unity-style resource browser: folder tree on left, file grid on right.
+    fn ui_project_browser(&mut self, ctx: &egui::Context) {
+        // Initial scan
+        if !self.project_scanned {
+            self.project_entries = scan_directory(&self.project_dir);
+            self.project_folders = collect_folders(&std::path::PathBuf::from("resources"));
+            self.project_scanned = true;
+        }
+
+        egui::TopBottomPanel::bottom("project_browser")
+            .default_height(200.0)
+            .resizable(true)
+            .frame(panel_frame())
+            .show(ctx, |ui| {
+                // --- Top bar: breadcrumb + controls ---
+                ui.horizontal(|ui| {
+                    ui.style_mut().spacing.item_spacing.x = 4.0;
+
+                    // Breadcrumb navigation
+                    let parts: Vec<String> = self.project_dir
+                        .components()
+                        .map(|c| c.as_os_str().to_string_lossy().to_string())
+                        .collect();
+                    for (i, part) in parts.iter().enumerate() {
+                        if i > 0 {
+                            ui.label(
+                                egui::RichText::new("/")
+                                    .small()
+                                    .color(ui.visuals().weak_text_color()),
+                            );
+                        }
+                        let is_last = i == parts.len() - 1;
+                        if is_last {
+                            ui.strong(part);
+                        } else if ui.small_button(part).clicked() {
+                            let new_dir: std::path::PathBuf = parts[..=i].iter().collect();
+                            self.project_dir = new_dir;
+                            self.project_entries = scan_directory(&self.project_dir);
+                            self.project_selected = None;
+                        }
+                    }
+
+                    ui.separator();
+
+                    // Up button
+                    if ui.small_button("\u{2B06} Up").on_hover_text("Go to parent folder").clicked() {
+                        if let Some(parent) = self.project_dir.parent() {
+                            // Don't go above project root
+                            if parent.components().count() > 0 {
+                                self.project_dir = parent.to_path_buf();
+                                self.project_entries = scan_directory(&self.project_dir);
+                                self.project_selected = None;
+                            }
+                        }
+                    }
+
+                    if ui.small_button("\u{21BB} Refresh").on_hover_text("Re-scan directory").clicked() {
+                        self.project_entries = scan_directory(&self.project_dir);
+                        self.project_folders = collect_folders(&std::path::PathBuf::from("resources"));
+                        self.project_selected = None;
+                    }
+
+                    ui.separator();
+
+                    // Tile size slider
+                    ui.label(
+                        egui::RichText::new("Size:")
+                            .small()
+                            .color(ui.visuals().weak_text_color()),
+                    );
+                    ui.add(egui::Slider::new(&mut self.project_tile_size, 48.0..=128.0).show_value(false));
+
+                    ui.separator();
+
+                    // Script loader (moved from old bottom panel)
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        ui.label(
+                            egui::RichText::new("Script:")
+                                .small()
+                                .color(ui.visuals().weak_text_color()),
+                        );
+                        ui.add(egui::TextEdit::singleline(&mut self.script_path_input).desired_width(200.0));
+                        if ui.small_button("Load").clicked() {
+                            let path = PathBuf::from(self.script_path_input.trim());
+                            if path.exists() {
+                                let _ = self.engine.load_script(&path);
+                            }
+                        }
+                        ui.checkbox(&mut self.hot_reload, "Hot reload");
+                        self.engine.set_hot_reload(self.hot_reload);
+                    }
+                    #[cfg(target_arch = "wasm32")]
+                    ui.label("WebGL");
+                });
+
+                ui.add_space(2.0);
+                ui.separator();
+
+                // --- Body: folder tree (left) + file grid (right) ---
+                ui.horizontal_top(|ui| {
+                    // Folder tree (left panel, fixed width)
+                    let tree_width = 160.0;
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(tree_width, ui.available_height()),
+                        egui::Layout::top_down(egui::Align::LEFT),
+                        |ui| {
+                            egui::ScrollArea::vertical()
+                                .id_salt("project_tree")
+                                .show(ui, |ui| {
+                                    for folder in &self.project_folders.clone() {
+                                        let depth = folder
+                                            .strip_prefix("resources")
+                                            .map(|r| r.components().count())
+                                            .unwrap_or(0);
+                                        let indent = depth as f32 * 14.0;
+                                        let display_name = folder
+                                            .file_name()
+                                            .unwrap_or(folder.as_os_str())
+                                            .to_string_lossy()
+                                            .to_string();
+                                        let is_selected = *folder == self.project_dir;
+
+                                        ui.horizontal(|ui| {
+                                            ui.add_space(indent);
+                                            let label = if is_selected {
+                                                egui::RichText::new(format!("\u{1F4C2} {}", display_name))
+                                                    .strong()
+                                                    .color(egui::Color32::from_rgb(220, 190, 100))
+                                            } else {
+                                                egui::RichText::new(format!("\u{1F4C1} {}", display_name))
+                                                    .color(egui::Color32::from_rgb(200, 180, 120))
+                                            };
+                                            if ui.selectable_label(is_selected, label).clicked() {
+                                                self.project_dir = folder.clone();
+                                                self.project_entries = scan_directory(&self.project_dir);
+                                                self.project_selected = None;
+                                            }
+                                        });
+                                    }
+                                });
+                        },
+                    );
+
+                    ui.separator();
+
+                    // File grid (right, fills remaining space)
+                    egui::ScrollArea::both()
+                        .id_salt("project_grid")
+                        .show(ui, |ui| {
+                            if self.project_entries.is_empty() {
+                                ui.label(
+                                    egui::RichText::new("Empty folder")
+                                        .italics()
+                                        .color(ui.visuals().weak_text_color()),
+                                );
+                                return;
+                            }
+
+                            let tile = self.project_tile_size;
+                            let available_width = ui.available_width();
+                            let cols = ((available_width / (tile + 8.0)).floor() as usize).max(1);
+                            let entries = self.project_entries.clone();
+
+                            let mut clicked_idx: Option<usize> = None;
+                            let mut double_clicked_idx: Option<usize> = None;
+
+                            egui::Grid::new("resource_grid")
+                                .spacing([4.0, 4.0])
+                                .show(ui, |ui| {
+                                    for (i, entry) in entries.iter().enumerate() {
+                                        let is_selected = self.project_selected == Some(i);
+
+                                        let (rect, response) = ui.allocate_exact_size(
+                                            egui::vec2(tile, tile + 16.0),
+                                            egui::Sense::click(),
+                                        );
+
+                                        if response.clicked() {
+                                            clicked_idx = Some(i);
+                                        }
+                                        if response.double_clicked() {
+                                            double_clicked_idx = Some(i);
+                                        }
+
+                                        // Background
+                                        let bg = if is_selected {
+                                            egui::Color32::from_rgba_unmultiplied(80, 120, 200, 60)
+                                        } else if response.hovered() {
+                                            egui::Color32::from_rgba_unmultiplied(80, 80, 80, 40)
+                                        } else {
+                                            egui::Color32::TRANSPARENT
+                                        };
+                                        ui.painter().rect_filled(rect, 4.0, bg);
+
+                                        // Icon area
+                                        let icon_rect = egui::Rect::from_min_size(
+                                            rect.min,
+                                            egui::vec2(tile, tile - 4.0),
+                                        );
+
+                                        // Image thumbnail for image files
+                                        let mut drew_thumb = false;
+                                        if entry.kind == FileKind::Image {
+                                            if !self.project_thumbnails.contains_key(&entry.path) {
+                                                if let Some(tex) = load_image_texture(ctx, &entry.path) {
+                                                    self.project_thumbnails.insert(entry.path.clone(), tex);
+                                                }
+                                            }
+                                            if let Some(tex) = self.project_thumbnails.get(&entry.path) {
+                                                let img_size = tex.size_vec2();
+                                                let scale = ((tile - 8.0) / img_size.x)
+                                                    .min((tile - 12.0) / img_size.y);
+                                                let display = img_size * scale;
+                                                let img_rect = egui::Rect::from_center_size(
+                                                    icon_rect.center(),
+                                                    display,
+                                                );
+                                                ui.painter().image(
+                                                    tex.id(),
+                                                    img_rect,
+                                                    egui::Rect::from_min_max(
+                                                        egui::pos2(0.0, 0.0),
+                                                        egui::pos2(1.0, 1.0),
+                                                    ),
+                                                    egui::Color32::WHITE,
+                                                );
+                                                drew_thumb = true;
+                                            }
+                                        }
+
+                                        if !drew_thumb {
+                                            // Draw file type icon
+                                            let icon_text = entry.kind.icon();
+                                            let icon_size = (tile * 0.45).clamp(16.0, 48.0);
+                                            ui.painter().text(
+                                                icon_rect.center(),
+                                                egui::Align2::CENTER_CENTER,
+                                                icon_text,
+                                                egui::FontId::proportional(icon_size),
+                                                entry.kind.color(),
+                                            );
+                                        }
+
+                                        // File name below icon
+                                        let name_rect = egui::Rect::from_min_max(
+                                            egui::pos2(rect.min.x, rect.max.y - 14.0),
+                                            rect.max,
+                                        );
+                                        let truncated = if entry.name.len() > 12 {
+                                            format!("{}…", &entry.name[..11])
+                                        } else {
+                                            entry.name.clone()
+                                        };
+                                        ui.painter().text(
+                                            name_rect.center(),
+                                            egui::Align2::CENTER_CENTER,
+                                            &truncated,
+                                            egui::FontId::proportional(10.0),
+                                            if is_selected {
+                                                egui::Color32::WHITE
+                                            } else {
+                                                egui::Color32::from_gray(200)
+                                            },
+                                        );
+
+                                        // Tooltip
+                                        response.on_hover_ui(|ui| {
+                                            ui.strong(&entry.name);
+                                            ui.label(entry.path.display().to_string());
+                                            if entry.kind != FileKind::Folder {
+                                                ui.label(format_size(entry.size));
+                                            }
+                                        });
+
+                                        // End of row
+                                        if (i + 1) % cols == 0 {
+                                            ui.end_row();
+                                        }
+                                    }
+                                });
+
+                            // Handle clicks
+                            if let Some(idx) = clicked_idx {
+                                self.project_selected = Some(idx);
+                            }
+                            if let Some(idx) = double_clicked_idx {
+                                let entry = &entries[idx];
+                                if entry.kind == FileKind::Folder {
+                                    self.project_dir = entry.path.clone();
+                                    self.project_entries = scan_directory(&self.project_dir);
+                                    self.project_selected = None;
+                                } else if entry.kind == FileKind::Script {
+                                    // Double-click script → load it
+                                    #[cfg(not(target_arch = "wasm32"))]
+                                    {
+                                        // If it looks like a compiled library, load as script
+                                        let ext = entry.path.extension()
+                                            .and_then(|e| e.to_str())
+                                            .unwrap_or("");
+                                        if ext == "so" || ext == "dll" || ext == "dylib" {
+                                            let _ = self.engine.load_script(&entry.path);
+                                        } else {
+                                            self.script_path_input = entry.path.display().to_string();
+                                        }
+                                    }
+                                } else if entry.kind == FileKind::Audio {
+                                    // Double-click audio → play it
+                                    let _ = self.engine.audio_play_file(&entry.path, false, 0.8);
+                                }
+                            }
+                        });
+                });
+            });
     }
 
     fn ui_media(&mut self, ctx: &egui::Context) {
