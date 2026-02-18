@@ -251,6 +251,51 @@ fn load_image_texture(
     ))
 }
 
+/// Scan `resources/fonts/` and install every .ttf / .otf into egui.
+/// Returns `(font_file_paths, family_names_loaded)`.
+fn load_custom_fonts(ctx: &egui::Context) -> (Vec<std::path::PathBuf>, Vec<String>) {
+    let files = scan_resource_dir("fonts", &["ttf", "otf"]);
+    if files.is_empty() {
+        return (files, Vec::new());
+    }
+    let mut fonts = egui::FontDefinitions::default();
+    let mut families = Vec::new();
+    for path in &files {
+        let Ok(data) = std::fs::read(path) else { continue };
+        let stem = path
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        let family_name = stem.clone();
+        fonts.font_data.insert(
+            family_name.clone(),
+            egui::FontData::from_owned(data).into(),
+        );
+        // Register as its own FontFamily so it can be selected by name.
+        let family = egui::FontFamily::Name(family_name.clone().into());
+        fonts
+            .families
+            .entry(family.clone())
+            .or_default()
+            .insert(0, family_name.clone());
+        // Also prepend to Proportional so the font is usable everywhere.
+        fonts
+            .families
+            .entry(egui::FontFamily::Proportional)
+            .or_default()
+            .push(family_name.clone());
+        fonts
+            .families
+            .entry(egui::FontFamily::Monospace)
+            .or_default()
+            .push(family_name.clone());
+        families.push(family_name);
+    }
+    ctx.set_fonts(fonts);
+    (files, families)
+}
+
 pub struct EditorApp {
     pub engine: EngineContext,
     pub mode: EditorMode,
@@ -320,12 +365,21 @@ pub struct EditorApp {
     media_selected_image: Option<usize>,
     /// Cached image textures (path string → texture handle).
     media_textures: std::collections::HashMap<std::path::PathBuf, egui::TextureHandle>,
+    /// Cached list of font files in resources/fonts/.
+    font_files: Vec<std::path::PathBuf>,
+    /// Selected font file index.
+    media_selected_font: Option<usize>,
+    /// Names of loaded custom font families (one per loaded file).
+    loaded_font_families: Vec<String>,
+    /// Preview text for font preview.
+    font_preview_text: String,
 }
 
 impl EditorApp {
-    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let mut engine = EngineContext::new();
         engine.set_hot_reload(true);
+        let (font_files, loaded_font_families) = load_custom_fonts(&cc.egui_ctx);
         Self {
             engine,
             mode: EditorMode::default(),
@@ -372,6 +426,10 @@ impl EditorApp {
             media_selected_audio: None,
             media_selected_image: None,
             media_textures: std::collections::HashMap::new(),
+            font_files,
+            media_selected_font: None,
+            loaded_font_families,
+            font_preview_text: "The quick brown fox jumps over the lazy dog.\n0123456789 !@#$%^&*()".to_string(),
         }
     }
 }
@@ -721,9 +779,13 @@ impl EditorApp {
                 panel_header(ui, "Browser");
                 ui.add_space(4.0);
 
-                if ui.button("Refresh").on_hover_text("Re-scan resources/audio and resources/assets").clicked() {
+                if ui.button("Refresh").on_hover_text("Re-scan resources/ folders (audio, assets, fonts)").clicked() {
                     self.audio_files = scan_resource_dir("audio", &["mp3", "ogg", "wav", "flac", "aac"]);
                     self.image_files = scan_resource_dir("assets", &["png", "jpg", "jpeg", "bmp", "webp"]);
+                    let (ff, fam) = load_custom_fonts(ctx);
+                    self.font_files = ff;
+                    self.loaded_font_families = fam;
+                    self.media_selected_font = None;
                 }
                 ui.add_space(6.0);
 
@@ -778,13 +840,46 @@ impl EditorApp {
                 } else {
                     egui::ScrollArea::vertical()
                         .id_salt("image_list")
-                        .auto_shrink([false; 2])
+                        .max_height(200.0)
                         .show(ui, |ui| {
                             for (i, path) in self.image_files.iter().enumerate() {
                                 let name = path.file_name().unwrap_or_default().to_string_lossy();
                                 let selected = self.media_selected_image == Some(i);
                                 if ui.selectable_label(selected, name.as_ref()).clicked() {
                                     self.media_selected_image = Some(i);
+                                }
+                            }
+                        });
+                }
+
+                ui.add_space(10.0);
+                ui.separator();
+                ui.add_space(10.0);
+
+                // ---- Font files ----
+                ui.strong("Fonts");
+                ui.label(
+                    egui::RichText::new("resources/fonts/")
+                        .small()
+                        .color(ui.visuals().weak_text_color()),
+                );
+                ui.add_space(4.0);
+                if self.font_files.is_empty() {
+                    ui.label(
+                        egui::RichText::new("No font files. Place .ttf/.otf files in resources/fonts/")
+                            .small()
+                            .color(ui.visuals().weak_text_color()),
+                    );
+                } else {
+                    egui::ScrollArea::vertical()
+                        .id_salt("font_list")
+                        .auto_shrink([false; 2])
+                        .show(ui, |ui| {
+                            for (i, path) in self.font_files.iter().enumerate() {
+                                let name = path.file_name().unwrap_or_default().to_string_lossy();
+                                let selected = self.media_selected_font == Some(i);
+                                if ui.selectable_label(selected, name.as_ref()).clicked() {
+                                    self.media_selected_font = Some(i);
                                 }
                             }
                         });
@@ -908,6 +1003,56 @@ impl EditorApp {
                     } else {
                         ui.label(
                             egui::RichText::new("Select an image file from the browser.")
+                                .small()
+                                .color(ui.visuals().weak_text_color()),
+                        );
+                    }
+                });
+
+                ui.add_space(12.0);
+                ui.separator();
+                ui.add_space(12.0);
+
+                // ---- Font preview ----
+                ui.group(|ui| {
+                    ui.strong("Font Preview");
+                    ui.add_space(4.0);
+
+                    if let Some(idx) = self.media_selected_font {
+                        if let Some(path) = self.font_files.get(idx) {
+                            let file_name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                            let family_name = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+                            ui.label(format!("Selected: {}", file_name));
+                            ui.label(
+                                egui::RichText::new(format!("Family: \"{}\"", family_name))
+                                    .small()
+                                    .color(ui.visuals().weak_text_color()),
+                            );
+                            ui.add_space(6.0);
+
+                            ui.label("Preview text:");
+                            ui.text_edit_multiline(&mut self.font_preview_text);
+                            ui.add_space(6.0);
+
+                            let family = egui::FontFamily::Name(family_name.into());
+                            for &size in &[14.0_f32, 20.0, 28.0, 40.0] {
+                                ui.label(
+                                    egui::RichText::new(&self.font_preview_text)
+                                        .font(egui::FontId::new(size, family.clone()))
+                                        .color(egui::Color32::WHITE),
+                                );
+                                ui.add_space(4.0);
+                            }
+                        }
+                    } else if self.loaded_font_families.is_empty() {
+                        ui.label(
+                            egui::RichText::new("No fonts loaded. Place .ttf/.otf files in resources/fonts/ and click Refresh.")
+                                .small()
+                                .color(ui.visuals().weak_text_color()),
+                        );
+                    } else {
+                        ui.label(
+                            egui::RichText::new("Select a font from the browser.")
                                 .small()
                                 .color(ui.visuals().weak_text_color()),
                         );
