@@ -272,6 +272,8 @@ pub struct EditorApp {
     map_pan: egui::Vec2,
     /// Brush radius: 0 = single tile (1x1), 1 = 3x3, 2 = 5x5.
     brush_radius: u32,
+    /// Show province/nation name labels on the map.
+    show_map_names: bool,
 }
 
 impl EditorApp {
@@ -319,6 +321,7 @@ impl EditorApp {
             map_zoom: 1.0,
             map_pan: egui::Vec2::ZERO,
             brush_radius: 0,
+            show_map_names: false,
         }
     }
 }
@@ -364,6 +367,9 @@ impl eframe::App for EditorApp {
             }
             if ctx.input(|i| i.key_pressed(egui::Key::CloseBracket)) {
                 self.brush_radius = (self.brush_radius + 1).min(3);
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::N)) {
+                self.show_map_names = !self.show_map_names;
             }
         }
 
@@ -1293,6 +1299,7 @@ impl EditorApp {
 
     fn ui_map_editor(&mut self, ctx: &egui::Context) {
         let paint_ownership = self.map_paint_mode == MapEditorPaintMode::PaintOwnership;
+        let show_names = self.show_map_names;
         let is_irregular = self
             .engine
             .world()
@@ -1367,6 +1374,9 @@ impl EditorApp {
                         self.map_zoom = 1.0;
                         self.map_pan = egui::Vec2::ZERO;
                     }
+                    ui.separator();
+                    ui.checkbox(&mut self.show_map_names, "Names")
+                        .on_hover_text("Show province/nation labels on the map (N)");
                 });
                 ui.add_space(2.0);
 
@@ -1517,6 +1527,46 @@ impl EditorApp {
                                         }
                                     }
                                 }
+                                // --- Province / nation name labels ---
+                                if show_names {
+                                    let mut centroids: std::collections::HashMap<u32, (f32, f32, u32, u32)> =
+                                        std::collections::HashMap::new();
+                                    for y in vis_y0..vis_y1.min(map.height) {
+                                        for x in vis_x0..vis_x1.min(map.width) {
+                                            let raw = map.get(x, y);
+                                            if raw == 0 { continue; }
+                                            let owner_raw = st
+                                                .get(ProvinceId(NonZeroU32::new(raw).unwrap()))
+                                                .and_then(|p| p.owner)
+                                                .map(|n| n.0.get())
+                                                .unwrap_or(0);
+                                            let e = centroids.entry(raw).or_insert((0.0, 0.0, 0, owner_raw));
+                                            e.0 += origin.x + (x as f32 + 0.5) * cell_size;
+                                            e.1 += origin.y + (y as f32 + 0.5) * cell_size;
+                                            e.2 += 1;
+                                        }
+                                    }
+                                    let font_size = (cell_size * 0.75).clamp(7.0, 18.0);
+                                    let font_id = egui::FontId::proportional(font_size);
+                                    for (prov_raw, (sum_x, sum_y, count, owner_raw)) in &centroids {
+                                        let cx = sum_x / *count as f32;
+                                        let cy = sum_y / *count as f32;
+                                        let label = if paint_ownership && *owner_raw != 0 {
+                                            format!("N{}", owner_raw)
+                                        } else {
+                                            format!("P{}", prov_raw)
+                                        };
+                                        let pos = egui::Pos2::new(cx, cy);
+                                        let galley = painter.layout_no_wrap(label, font_id.clone(), egui::Color32::WHITE);
+                                        let text_rect = egui::Rect::from_center_size(pos, galley.size());
+                                        painter.rect_filled(
+                                            text_rect.expand(2.0),
+                                            2.0,
+                                            egui::Color32::from_rgba_premultiplied(0, 0, 0, 160),
+                                        );
+                                        painter.galley(text_rect.min, galley, egui::Color32::WHITE);
+                                    }
+                                }
                                 // --- Cursor → tile mapping (zoom/pan aware) ---
                                 let to_tile = |pos: egui::Pos2| -> Option<(u32, u32)> {
                                     let lx = (pos.x - origin.x) / cell_size;
@@ -1659,6 +1709,48 @@ impl EditorApp {
                                             province_border_stroke()
                                         };
                                         painter.add(egui::Shape::convex_polygon(points, base_color, stroke));
+                                    }
+                                }
+                                // --- Province / nation name labels (hex) ---
+                                if show_names {
+                                    let mut centroids: std::collections::HashMap<u32, (f32, f32, u32, u32)> =
+                                        std::collections::HashMap::new();
+                                    for r in 0..h {
+                                        for q in 0..w {
+                                            let raw = hex.get(q, r);
+                                            if raw == 0 { continue; }
+                                            let owner_raw = st
+                                                .get(ProvinceId(NonZeroU32::new(raw).unwrap()))
+                                                .and_then(|p| p.owner)
+                                                .map(|n| n.0.get())
+                                                .unwrap_or(0);
+                                            let hx = origin.x + (q as f32 + 0.5 * (r % 2) as f32) * hex_w;
+                                            let hy = origin.y + (r as f32 + 0.5) * hex_h * 0.5;
+                                            let e = centroids.entry(raw).or_insert((0.0, 0.0, 0, owner_raw));
+                                            e.0 += hx;
+                                            e.1 += hy;
+                                            e.2 += 1;
+                                        }
+                                    }
+                                    let font_size = (cell_size * 0.75).clamp(7.0, 18.0);
+                                    let font_id = egui::FontId::proportional(font_size);
+                                    for (prov_raw, (sum_x, sum_y, count, owner_raw)) in &centroids {
+                                        let cx = sum_x / *count as f32;
+                                        let cy = sum_y / *count as f32;
+                                        let label = if paint_ownership && *owner_raw != 0 {
+                                            format!("N{}", owner_raw)
+                                        } else {
+                                            format!("P{}", prov_raw)
+                                        };
+                                        let pos = egui::Pos2::new(cx, cy);
+                                        let galley = painter.layout_no_wrap(label, font_id.clone(), egui::Color32::WHITE);
+                                        let text_rect = egui::Rect::from_center_size(pos, galley.size());
+                                        painter.rect_filled(
+                                            text_rect.expand(2.0),
+                                            2.0,
+                                            egui::Color32::from_rgba_premultiplied(0, 0, 0, 160),
+                                        );
+                                        painter.galley(text_rect.min, galley, egui::Color32::WHITE);
                                     }
                                 }
                                 // --- Cursor → hex mapping ---
