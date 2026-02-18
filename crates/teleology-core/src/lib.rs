@@ -18,6 +18,7 @@ pub mod map_file;
 pub mod modifiers;
 pub mod events;
 pub mod event_bus;
+pub mod game_ui;
 pub mod population;
 pub mod progress_trees;
 pub mod armies;
@@ -51,6 +52,7 @@ pub use event_bus::{
     publish_event, EntityScopeRef, EventBus, EventEnvelope, EventPayload, EventScopeRef,
     EventTopicId, scope_types,
 };
+pub use game_ui::{UiCommand, UiCommandBuffer};
 pub use population::{PopGroup, PopulationConfig, ProvincePops};
 pub use progress_trees::{
     NationProgress, NodeId, ProgressNode, ProgressState, ProgressTreeDefinition, ProgressTrees,

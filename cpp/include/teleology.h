@@ -112,6 +112,43 @@ int          teleology_input_last_click(TeleologyEngine* engine, float* x_out, f
 /* Returns 1 if key is currently down; 0 otherwise. */
 int          teleology_input_key_down(TeleologyEngine* engine, uint32_t key_code);
 
+/* --- Game UI (immediate-mode; call during tick; rendered by engine each frame) ---
+ *
+ * Scripts declare UI each frame by calling begin/end pairs and widget functions.
+ * The engine renders them after the tick. Button clicks are available next frame
+ * via teleology_ui_button_was_clicked().
+ *
+ * Example:
+ *   teleology_ui_begin_window(engine, "HUD", 0, 0, 400, 40);
+ *     teleology_ui_label(engine, "Gold: 1234");
+ *     teleology_ui_button(engine, 1, "Diplomacy");
+ *   teleology_ui_end_window(engine);
+ *   if (teleology_ui_button_was_clicked(engine, 1)) { ... }
+ */
+
+/* Containers */
+void         teleology_ui_begin_window(TeleologyEngine* engine, const char* title, float x, float y, float w, float h);
+void         teleology_ui_end_window(TeleologyEngine* engine);
+void         teleology_ui_begin_horizontal(TeleologyEngine* engine);
+void         teleology_ui_end_horizontal(TeleologyEngine* engine);
+void         teleology_ui_begin_vertical(TeleologyEngine* engine);
+void         teleology_ui_end_vertical(TeleologyEngine* engine);
+
+/* Widgets */
+void         teleology_ui_label(TeleologyEngine* engine, const char* text);
+void         teleology_ui_label_sized(TeleologyEngine* engine, const char* text, float font_size);
+void         teleology_ui_button(TeleologyEngine* engine, uint32_t id, const char* text);
+/* Returns 1 if the button with this id was clicked last frame; 0 otherwise. */
+uint8_t      teleology_ui_button_was_clicked(TeleologyEngine* engine, uint32_t id);
+void         teleology_ui_progress_bar(TeleologyEngine* engine, float fraction, const char* text, float width);
+void         teleology_ui_image(TeleologyEngine* engine, const char* path, float w, float h);
+void         teleology_ui_separator(TeleologyEngine* engine);
+void         teleology_ui_spacing(TeleologyEngine* engine, float amount);
+
+/* Styling (applies to the next widget only) */
+void         teleology_ui_set_color(TeleologyEngine* engine, uint8_t r, uint8_t g, uint8_t b, uint8_t a);
+void         teleology_ui_set_font_size(TeleologyEngine* engine, float size);
+
 #ifdef __cplusplus
 }
 #endif

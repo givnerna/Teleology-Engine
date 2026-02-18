@@ -12,6 +12,7 @@ use teleology_core::{
     MapFile, MapKind, NationId, NationModifiers, NationStore, NationTags, ProgressState,
     ProgressTrees, ProvinceId, ProvinceModifiers, ProvinceStore, ProvinceTags, TagId, TagRegistry,
     TagTypeId, TickUnit, TimeConfig, Army, spawn_army, ActiveEvent, WorldBounds,
+    UiCommand, UiCommandBuffer,
 };
 use teleology_runtime::EngineContext;
 
@@ -616,6 +617,9 @@ impl eframe::App for EditorApp {
             EditorMode::Settings => self.ui_settings(ctx),
         }
 
+        // --- Script game UI (immediate-mode command buffer) ---
+        self.render_game_ui(ctx);
+
         // --- Bottom panel: Project / Console (Unity-style) ---
         egui::TopBottomPanel::bottom("project_console")
             .frame(panel_frame())
@@ -767,6 +771,243 @@ impl EditorApp {
         world.insert_resource(store);
         world.insert_resource(bounds);
         true
+    }
+
+    /// Render script-driven game UI from the UiCommandBuffer.
+    fn render_game_ui(&mut self, ctx: &egui::Context) {
+        let world = self.engine.world();
+        let (commands, prev_clicked) = {
+            let Some(buffer) = world.get_resource::<UiCommandBuffer>() else { return };
+            (buffer.commands.clone(), buffer.clicked_buttons.clone())
+        };
+
+        if commands.is_empty() {
+            return;
+        }
+
+        // State for walking the command stream
+        let mut clicked = Vec::new();
+        let mut pending_color: Option<egui::Color32> = None;
+        let mut pending_font_size: Option<f32> = None;
+
+        // We process commands in a flat walk. Windows use egui::Area + egui::Frame
+        // for positioning. Layout groups use closures captured in a stack approach,
+        // but since egui is immediate-mode we process sequentially.
+        let mut i = 0;
+        while i < commands.len() {
+            match &commands[i] {
+                UiCommand::BeginWindow { title, x, y, w, h } => {
+                    // Collect commands until matching EndWindow
+                    let start = i + 1;
+                    let mut depth = 1u32;
+                    let mut end = start;
+                    while end < commands.len() && depth > 0 {
+                        match &commands[end] {
+                            UiCommand::BeginWindow { .. } => depth += 1,
+                            UiCommand::EndWindow => depth -= 1,
+                            _ => {}
+                        }
+                        if depth > 0 {
+                            end += 1;
+                        }
+                    }
+                    let inner_cmds = &commands[start..end];
+                    let title = title.clone();
+                    let (wx, wy, ww, wh) = (*x, *y, *w, *h);
+
+                    egui::Window::new(&title)
+                        .id(egui::Id::new(format!("game_ui_{}", title)))
+                        .fixed_pos([wx, wy])
+                        .fixed_size([ww, wh])
+                        .title_bar(false)
+                        .collapsible(false)
+                        .resizable(false)
+                        .frame(egui::Frame::none()
+                            .fill(egui::Color32::from_black_alpha(180))
+                            .inner_margin(6.0)
+                            .rounding(4.0))
+                        .show(ctx, |ui| {
+                            Self::render_ui_commands(
+                                ui,
+                                inner_cmds,
+                                &prev_clicked,
+                                &mut clicked,
+                                &mut pending_color,
+                                &mut pending_font_size,
+                            );
+                        });
+
+                    i = if end < commands.len() { end + 1 } else { end };
+                }
+                UiCommand::EndWindow => {
+                    // Stray EndWindow outside a BeginWindow; skip
+                    i += 1;
+                }
+                _ => {
+                    // Top-level commands outside any window — skip (require a window)
+                    i += 1;
+                }
+            }
+        }
+
+        // Write back results
+        let world = self.engine.world_mut();
+        if let Some(mut buf) = world.get_resource_mut::<UiCommandBuffer>() {
+            buf.clicked_buttons = clicked;
+            buf.commands.clear();
+        }
+    }
+
+    /// Render a slice of UI commands into an egui Ui.
+    fn render_ui_commands(
+        ui: &mut egui::Ui,
+        commands: &[UiCommand],
+        prev_clicked: &[u32],
+        clicked: &mut Vec<u32>,
+        pending_color: &mut Option<egui::Color32>,
+        pending_font_size: &mut Option<f32>,
+    ) {
+        let mut i = 0;
+        while i < commands.len() {
+            match &commands[i] {
+                UiCommand::BeginHorizontal => {
+                    // Collect until EndHorizontal
+                    let start = i + 1;
+                    let mut depth = 1u32;
+                    let mut end = start;
+                    while end < commands.len() && depth > 0 {
+                        match &commands[end] {
+                            UiCommand::BeginHorizontal => depth += 1,
+                            UiCommand::EndHorizontal => depth -= 1,
+                            _ => {}
+                        }
+                        if depth > 0 { end += 1; }
+                    }
+                    let inner = &commands[start..end];
+                    ui.horizontal(|ui| {
+                        Self::render_ui_commands(ui, inner, prev_clicked, clicked, pending_color, pending_font_size);
+                    });
+                    i = if end < commands.len() { end + 1 } else { end };
+                }
+                UiCommand::EndHorizontal => { i += 1; }
+
+                UiCommand::BeginVertical => {
+                    let start = i + 1;
+                    let mut depth = 1u32;
+                    let mut end = start;
+                    while end < commands.len() && depth > 0 {
+                        match &commands[end] {
+                            UiCommand::BeginVertical => depth += 1,
+                            UiCommand::EndVertical => depth -= 1,
+                            _ => {}
+                        }
+                        if depth > 0 { end += 1; }
+                    }
+                    let inner = &commands[start..end];
+                    ui.vertical(|ui| {
+                        Self::render_ui_commands(ui, inner, prev_clicked, clicked, pending_color, pending_font_size);
+                    });
+                    i = if end < commands.len() { end + 1 } else { end };
+                }
+                UiCommand::EndVertical => { i += 1; }
+
+                UiCommand::Label { text, font_size } => {
+                    let size = if *font_size > 0.0 {
+                        *font_size
+                    } else {
+                        pending_font_size.take().unwrap_or(14.0)
+                    };
+                    let mut rt = egui::RichText::new(text).size(size);
+                    if let Some(color) = pending_color.take() {
+                        rt = rt.color(color);
+                    }
+                    ui.label(rt);
+                    i += 1;
+                }
+
+                UiCommand::Button { id, text } => {
+                    let mut rt = egui::RichText::new(text);
+                    if let Some(color) = pending_color.take() {
+                        rt = rt.color(color);
+                    }
+                    if let Some(size) = pending_font_size.take() {
+                        rt = rt.size(size);
+                    }
+                    if ui.button(rt).clicked() {
+                        clicked.push(*id);
+                    }
+                    i += 1;
+                }
+
+                UiCommand::ProgressBar { fraction, text, w } => {
+                    pending_color.take();
+                    pending_font_size.take();
+                    let bar = egui::ProgressBar::new(*fraction)
+                        .text(text.as_str())
+                        .desired_width(*w);
+                    ui.add(bar);
+                    i += 1;
+                }
+
+                UiCommand::Image { path: _path, w, h } => {
+                    pending_color.take();
+                    pending_font_size.take();
+                    // Placeholder: show a colored rect where the image would go
+                    let (rect, _) = ui.allocate_exact_size(
+                        egui::vec2(*w, *h),
+                        egui::Sense::hover(),
+                    );
+                    ui.painter().rect_filled(rect, 0.0, egui::Color32::from_gray(60));
+                    ui.painter().text(
+                        rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "[img]",
+                        egui::FontId::proportional(10.0),
+                        egui::Color32::from_gray(140),
+                    );
+                    i += 1;
+                }
+
+                UiCommand::Separator => {
+                    pending_color.take();
+                    pending_font_size.take();
+                    ui.separator();
+                    i += 1;
+                }
+
+                UiCommand::Spacing { amount } => {
+                    pending_color.take();
+                    pending_font_size.take();
+                    ui.add_space(*amount);
+                    i += 1;
+                }
+
+                UiCommand::SetColor { r, g, b, a } => {
+                    *pending_color = Some(egui::Color32::from_rgba_unmultiplied(*r, *g, *b, *a));
+                    i += 1;
+                }
+
+                UiCommand::SetFontSize { size } => {
+                    *pending_font_size = Some(*size);
+                    i += 1;
+                }
+
+                // Nested windows inside a window are skipped (not supported)
+                UiCommand::BeginWindow { .. } => {
+                    let mut depth = 1u32;
+                    i += 1;
+                    while i < commands.len() && depth > 0 {
+                        match &commands[i] {
+                            UiCommand::BeginWindow { .. } => depth += 1,
+                            UiCommand::EndWindow => depth -= 1,
+                            _ => {}
+                        }
+                        i += 1;
+                    }
+                }
+                UiCommand::EndWindow => { i += 1; }
+            }
+        }
     }
 
     fn ui_media(&mut self, ctx: &egui::Context) {

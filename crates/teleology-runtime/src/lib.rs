@@ -13,6 +13,7 @@ use teleology_core::{
     GameDate, GameWorld, NationId, NationTags, ProvinceId, ProvinceStore, ProvinceTags,
     ProgressState, ProgressTrees, SimulationSchedule, TagId, TagRegistry, TagTypeId, WorldBuilder,
     WorldBounds, WorldSimulation,
+    UiCommand, UiCommandBuffer,
 };
 use teleology_script_api::{
     load_script_api, CArmyId, CGameDate, CGameTime, CNodeId, CNationId, CProvinceId, CTagId,
@@ -72,6 +73,7 @@ impl EngineContext {
             .map_size(20, 10)
             .build(&mut world);
         SimulationSchedule::build(&mut world);
+        world.insert_resource(UiCommandBuffer::new());
         Self {
             world: UnsafeCell::new(world),
             script_lib: None,
@@ -640,6 +642,167 @@ pub extern "C" fn teleology_input_key_down(engine: *mut TeleologyEngine, key_cod
     } else {
         0
     }
+}
+
+// --- Game UI (immediate-mode command buffer; scripts push commands, host renders) ---
+
+fn ensure_ui_buffer(world: &mut GameWorld) {
+    if world.get_resource::<UiCommandBuffer>().is_none() {
+        world.insert_resource(UiCommandBuffer::new());
+    }
+}
+
+fn push_ui_cmd(engine: *mut TeleologyEngine, cmd: UiCommand) {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_ui_buffer(world);
+    if let Some(mut buf) = world.get_resource_mut::<UiCommandBuffer>() {
+        buf.push(cmd);
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_ui_begin_window(
+    engine: *mut TeleologyEngine,
+    title: *const std::ffi::c_char,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+) {
+    let title = if title.is_null() {
+        String::new()
+    } else {
+        unsafe { CStr::from_ptr(title) }.to_string_lossy().into_owned()
+    };
+    push_ui_cmd(engine, UiCommand::BeginWindow { title, x, y, w, h });
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_ui_end_window(engine: *mut TeleologyEngine) {
+    push_ui_cmd(engine, UiCommand::EndWindow);
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_ui_begin_horizontal(engine: *mut TeleologyEngine) {
+    push_ui_cmd(engine, UiCommand::BeginHorizontal);
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_ui_end_horizontal(engine: *mut TeleologyEngine) {
+    push_ui_cmd(engine, UiCommand::EndHorizontal);
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_ui_begin_vertical(engine: *mut TeleologyEngine) {
+    push_ui_cmd(engine, UiCommand::BeginVertical);
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_ui_end_vertical(engine: *mut TeleologyEngine) {
+    push_ui_cmd(engine, UiCommand::EndVertical);
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_ui_label(engine: *mut TeleologyEngine, text: *const std::ffi::c_char) {
+    let text = if text.is_null() {
+        String::new()
+    } else {
+        unsafe { CStr::from_ptr(text) }.to_string_lossy().into_owned()
+    };
+    push_ui_cmd(engine, UiCommand::Label { text, font_size: 0.0 });
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_ui_label_sized(
+    engine: *mut TeleologyEngine,
+    text: *const std::ffi::c_char,
+    font_size: f32,
+) {
+    let text = if text.is_null() {
+        String::new()
+    } else {
+        unsafe { CStr::from_ptr(text) }.to_string_lossy().into_owned()
+    };
+    push_ui_cmd(engine, UiCommand::Label { text, font_size });
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_ui_button(
+    engine: *mut TeleologyEngine,
+    id: u32,
+    text: *const std::ffi::c_char,
+) {
+    let text = if text.is_null() {
+        String::new()
+    } else {
+        unsafe { CStr::from_ptr(text) }.to_string_lossy().into_owned()
+    };
+    push_ui_cmd(engine, UiCommand::Button { id, text });
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_ui_button_was_clicked(engine: *mut TeleologyEngine, id: u32) -> u8 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0 };
+    let world = unsafe { &*ctx.world.get() };
+    let Some(buf) = world.get_resource::<UiCommandBuffer>() else { return 0 };
+    if buf.was_clicked(id) { 1 } else { 0 }
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_ui_progress_bar(
+    engine: *mut TeleologyEngine,
+    fraction: f32,
+    text: *const std::ffi::c_char,
+    width: f32,
+) {
+    let text = if text.is_null() {
+        String::new()
+    } else {
+        unsafe { CStr::from_ptr(text) }.to_string_lossy().into_owned()
+    };
+    push_ui_cmd(engine, UiCommand::ProgressBar { fraction, text, w: width });
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_ui_image(
+    engine: *mut TeleologyEngine,
+    path: *const std::ffi::c_char,
+    w: f32,
+    h: f32,
+) {
+    let path = if path.is_null() {
+        String::new()
+    } else {
+        unsafe { CStr::from_ptr(path) }.to_string_lossy().into_owned()
+    };
+    push_ui_cmd(engine, UiCommand::Image { path, w, h });
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_ui_separator(engine: *mut TeleologyEngine) {
+    push_ui_cmd(engine, UiCommand::Separator);
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_ui_spacing(engine: *mut TeleologyEngine, amount: f32) {
+    push_ui_cmd(engine, UiCommand::Spacing { amount });
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_ui_set_color(
+    engine: *mut TeleologyEngine,
+    r: u8,
+    g: u8,
+    b: u8,
+    a: u8,
+) {
+    push_ui_cmd(engine, UiCommand::SetColor { r, g, b, a });
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_ui_set_font_size(engine: *mut TeleologyEngine, size: f32) {
+    push_ui_cmd(engine, UiCommand::SetFontSize { size });
 }
 
 #[cfg(test)]
