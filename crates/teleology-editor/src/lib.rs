@@ -1992,6 +1992,9 @@ impl EditorApp {
                                 next_event: None,
                                 effects_payload: Vec::new(),
                             }],
+                            image: String::new(),
+                            image_w: 0.0,
+                            image_h: 0.0,
                         });
                         self.event_selected_raw = Some(id.raw());
                     }
@@ -3320,21 +3323,28 @@ impl EditorApp {
                             ui.separator();
                             ui.add_space(4.0);
 
-                            // Image (if set)
-                            if !style.image_path.is_empty() {
-                                let img_w = if style.image_w > 0.0 { style.image_w } else { 200.0 };
-                                let img_h = if style.image_h > 0.0 { style.image_h } else { 100.0 };
+                            // Image: per-event image overrides global style image
+                            let (img_path, img_w, img_h) = if !def.image.is_empty() {
+                                (def.image.as_str(), def.image_w, def.image_h)
+                            } else if !style.image_path.is_empty() {
+                                (style.image_path.as_str(), style.image_w, style.image_h)
+                            } else {
+                                ("", 0.0, 0.0)
+                            };
+                            if !img_path.is_empty() {
+                                let disp_w = if img_w > 0.0 { img_w } else { 200.0 };
+                                let disp_h = if img_h > 0.0 { img_h } else { 100.0 };
                                 let (r, _) = ui.allocate_exact_size(
-                                    egui::vec2(img_w, img_h),
+                                    egui::vec2(disp_w, disp_h),
                                     egui::Sense::hover(),
                                 );
                                 // Try to load image texture
-                                if !self.project_thumbnails.contains_key(std::path::Path::new(&style.image_path)) {
-                                    if let Some(tex) = load_image_texture(ctx, std::path::Path::new(&style.image_path)) {
-                                        self.project_thumbnails.insert(std::path::PathBuf::from(&style.image_path), tex);
+                                if !self.project_thumbnails.contains_key(std::path::Path::new(img_path)) {
+                                    if let Some(tex) = load_image_texture(ctx, std::path::Path::new(img_path)) {
+                                        self.project_thumbnails.insert(std::path::PathBuf::from(img_path), tex);
                                     }
                                 }
-                                if let Some(tex) = self.project_thumbnails.get(std::path::Path::new(&style.image_path)) {
+                                if let Some(tex) = self.project_thumbnails.get(std::path::Path::new(img_path)) {
                                     ui.painter().image(
                                         tex.id(),
                                         r,
@@ -3350,7 +3360,7 @@ impl EditorApp {
                                     ui.painter().text(
                                         r.center(),
                                         egui::Align2::CENTER_CENTER,
-                                        &style.image_path,
+                                        img_path,
                                         egui::FontId::proportional(10.0),
                                         egui::Color32::from_gray(140),
                                     );
@@ -3783,6 +3793,9 @@ impl EditorApp {
                                 effects_payload: Vec::new(),
                             },
                         ],
+                        image: String::new(),
+                        image_w: 0.0,
+                        image_h: 0.0,
                     });
                     queue_event(world, id, teleology_core::EventScope::global(), Vec::new());
                 }

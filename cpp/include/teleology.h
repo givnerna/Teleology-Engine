@@ -227,6 +227,8 @@ int32_t      teleology_event_add_choice(TeleologyEngine* engine, uint32_t event_
 uint8_t      teleology_event_set_choice_text(TeleologyEngine* engine, uint32_t event_id, uint32_t choice_idx, const char* text);
 uint8_t      teleology_event_set_title(TeleologyEngine* engine, uint32_t event_id, const char* title);
 uint8_t      teleology_event_set_body(TeleologyEngine* engine, uint32_t event_id, const char* body);
+/* Set per-event image. path is relative to project resources dir. w/h=0 for natural size. */
+uint8_t      teleology_event_set_image(TeleologyEngine* engine, uint32_t event_id, const char* path, float w, float h);
 
 /* Event lifecycle */
 /* scope_type: 0=Global, 1=Province, 2=Nation, 3=Character, 4=Army */

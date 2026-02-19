@@ -107,6 +107,12 @@ pub struct EventDefinition {
     pub title: String,
     pub body: String,
     pub choices: Vec<EventChoice>,
+    /// Optional image path shown in the pop-up (overrides global style image).
+    pub image: String,
+    /// Image width (0 = use global style or auto).
+    pub image_w: f32,
+    /// Image height (0 = use global style or auto).
+    pub image_h: f32,
 }
 
 /// Event registry: stores definitions.
@@ -303,6 +309,9 @@ impl EventTemplate {
                     next_event: None,
                     effects_payload: Vec::new(),
                 }],
+                image: String::new(),
+                image_w: 0.0,
+                image_h: 0.0,
             },
             EventTemplate::BinaryChoice => EventDefinition {
                 id: EventId(NonZeroU32::new(1).unwrap()),
@@ -320,6 +329,9 @@ impl EventTemplate {
                         effects_payload: Vec::new(),
                     },
                 ],
+                image: String::new(),
+                image_w: 0.0,
+                image_h: 0.0,
             },
             EventTemplate::ThreeWayChoice => EventDefinition {
                 id: EventId(NonZeroU32::new(1).unwrap()),
@@ -342,6 +354,9 @@ impl EventTemplate {
                         effects_payload: Vec::new(),
                     },
                 ],
+                image: String::new(),
+                image_w: 0.0,
+                image_h: 0.0,
             },
             EventTemplate::Narrative => EventDefinition {
                 id: EventId(NonZeroU32::new(1).unwrap()),
@@ -352,6 +367,9 @@ impl EventTemplate {
                     next_event: None,
                     effects_payload: Vec::new(),
                 }],
+                image: String::new(),
+                image_w: 0.0,
+                image_h: 0.0,
             },
             EventTemplate::DiplomaticProposal => EventDefinition {
                 id: EventId(NonZeroU32::new(1).unwrap()),
@@ -374,6 +392,9 @@ impl EventTemplate {
                         effects_payload: Vec::new(),
                     },
                 ],
+                image: String::new(),
+                image_w: 0.0,
+                image_h: 0.0,
             },
         }
     }

@@ -583,6 +583,9 @@ pub extern "C" fn teleology_event_define(
         title,
         body,
         choices: Vec::new(),
+        image: String::new(),
+        image_w: 0.0,
+        image_h: 0.0,
     };
     reg.insert(def).raw()
 }
@@ -691,6 +694,31 @@ pub extern "C" fn teleology_event_set_body(
     let Some(mut reg) = world.get_resource_mut::<EventRegistry>() else { return 0 };
     let Some(def) = reg.events.get_mut(&event_id) else { return 0 };
     def.body = body;
+    1
+}
+
+/// Set the image for an event definition. The path is relative to the project
+/// resources directory. Pass w=0, h=0 to use the image's natural size.
+/// Returns 1 on success, 0 on failure.
+#[no_mangle]
+pub extern "C" fn teleology_event_set_image(
+    engine: *mut TeleologyEngine,
+    event_id: u32,
+    path: *const std::ffi::c_char,
+    w: f32,
+    h: f32,
+) -> u8 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0 };
+    let path = if path.is_null() { String::new() } else {
+        unsafe { CStr::from_ptr(path) }.to_string_lossy().into_owned()
+    };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_event_system(world);
+    let Some(mut reg) = world.get_resource_mut::<EventRegistry>() else { return 0 };
+    let Some(def) = reg.events.get_mut(&event_id) else { return 0 };
+    def.image = path;
+    def.image_w = w;
+    def.image_h = h;
     1
 }
 
