@@ -480,6 +480,76 @@ impl KeywordRegistry {
         }
         filtered
     }
+
+    /// Load keywords from a JSON string, appending to existing entries.
+    /// The JSON should be an array of keyword objects:
+    /// ```json
+    /// [
+    ///   {
+    ///     "keyword": "Prestige",
+    ///     "title": "Prestige",
+    ///     "description": "A measure of your realm's renown.",
+    ///     "icon": "icons/prestige.png",
+    ///     "color": [255, 215, 0, 255]
+    ///   }
+    /// ]
+    /// ```
+    /// Fields `icon` and `color` are optional (default to "" and [0,0,0,0]).
+    pub fn load_from_json(&mut self, json: &str) -> Result<usize, String> {
+        let defs: Vec<KeywordJsonDef> =
+            serde_json::from_str(json).map_err(|e| format!("keyword JSON parse error: {e}"))?;
+        let count = defs.len();
+        for d in defs {
+            self.add(KeywordEntry {
+                keyword: d.keyword,
+                title: d.title,
+                description: d.description,
+                icon: d.icon.unwrap_or_default(),
+                color: d.color.unwrap_or([0, 0, 0, 0]),
+            });
+        }
+        Ok(count)
+    }
+
+    /// Load keywords from a JSON file, appending to existing entries.
+    /// Returns the number of keywords loaded.
+    pub fn load_from_file(&mut self, path: &std::path::Path) -> Result<usize, String> {
+        let contents = std::fs::read_to_string(path)
+            .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+        self.load_from_json(&contents)
+    }
+
+    /// Save current keywords to a JSON file (pretty-printed).
+    pub fn save_to_file(&self, path: &std::path::Path) -> Result<(), String> {
+        let defs: Vec<KeywordJsonDef> = self
+            .entries
+            .iter()
+            .map(|e| KeywordJsonDef {
+                keyword: e.keyword.clone(),
+                title: e.title.clone(),
+                description: e.description.clone(),
+                icon: if e.icon.is_empty() { None } else { Some(e.icon.clone()) },
+                color: if e.color == [0, 0, 0, 0] { None } else { Some(e.color) },
+            })
+            .collect();
+        let json = serde_json::to_string_pretty(&defs)
+            .map_err(|e| format!("keyword JSON serialize error: {e}"))?;
+        std::fs::write(path, json)
+            .map_err(|e| format!("failed to write {}: {e}", path.display()))
+    }
+}
+
+/// Internal JSON-friendly representation for keyword serialization.
+/// Allows `icon` and `color` to be omitted in the file.
+#[derive(Serialize, Deserialize)]
+struct KeywordJsonDef {
+    keyword: String,
+    title: String,
+    description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    icon: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    color: Option<[u8; 4]>,
 }
 
 /// Register all built-in templates into an `EventRegistry`, returning

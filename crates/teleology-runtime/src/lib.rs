@@ -558,7 +558,13 @@ fn ensure_event_system(world: &mut GameWorld) {
         world.insert_resource(EventQueue::default());
         world.insert_resource(ActiveEvent::default());
         world.insert_resource(EventPopupStyle::default());
-        world.insert_resource(KeywordRegistry::default());
+        // Auto-load keywords.json from the working directory if present.
+        let mut kw = KeywordRegistry::default();
+        let path = std::path::Path::new("keywords.json");
+        if path.exists() {
+            let _ = kw.load_from_file(path);
+        }
+        world.insert_resource(kw);
     }
 }
 
@@ -1058,6 +1064,58 @@ pub extern "C" fn teleology_keyword_count(engine: *mut TeleologyEngine) -> u32 {
     ensure_event_system(world);
     let Some(reg) = world.get_resource::<KeywordRegistry>() else { return 0 };
     reg.entries.len() as u32
+}
+
+/// Load keywords from a JSON file, appending to the registry.
+/// Returns the number of keywords loaded, or 0xFFFFFFFF on error.
+///
+/// The JSON should be an array of keyword objects:
+/// ```json
+/// [
+///   {
+///     "keyword": "Prestige",
+///     "title": "Prestige",
+///     "description": "A measure of your realm's renown.",
+///     "icon": "icons/prestige.png",
+///     "color": [255, 215, 0, 255]
+///   }
+/// ]
+/// ```
+#[no_mangle]
+pub extern "C" fn teleology_keyword_load_file(
+    engine: *mut TeleologyEngine,
+    path: *const std::ffi::c_char,
+) -> u32 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return u32::MAX };
+    let path = if path.is_null() { return u32::MAX } else {
+        unsafe { CStr::from_ptr(path) }.to_string_lossy().into_owned()
+    };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_event_system(world);
+    let Some(mut reg) = world.get_resource_mut::<KeywordRegistry>() else { return u32::MAX };
+    match reg.load_from_file(std::path::Path::new(&path)) {
+        Ok(n) => n as u32,
+        Err(_) => u32::MAX,
+    }
+}
+
+/// Save current keywords to a JSON file. Returns 1 on success, 0 on failure.
+#[no_mangle]
+pub extern "C" fn teleology_keyword_save_file(
+    engine: *mut TeleologyEngine,
+    path: *const std::ffi::c_char,
+) -> u8 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0 };
+    let path = if path.is_null() { return 0 } else {
+        unsafe { CStr::from_ptr(path) }.to_string_lossy().into_owned()
+    };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_event_system(world);
+    let Some(reg) = world.get_resource::<KeywordRegistry>() else { return 0 };
+    match reg.save_to_file(std::path::Path::new(&path)) {
+        Ok(()) => 1,
+        Err(_) => 0,
+    }
 }
 
 // --- Progress trees (nation scope; optional; lazy-init on first API use) ---

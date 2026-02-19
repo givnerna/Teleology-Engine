@@ -282,6 +282,35 @@ void         teleology_keyword_clear(TeleologyEngine* engine);
 /* Get the number of registered keywords. */
 uint32_t     teleology_keyword_count(TeleologyEngine* engine);
 
+/* Load keywords from a JSON file (appends to existing).
+ * Returns number of keywords loaded, or 0xFFFFFFFF on error.
+ *
+ * JSON format: array of objects with keyword, title, description,
+ * and optional icon (string) and color ([r,g,b,a] array).
+ *
+ * Example keywords.json:
+ *   [
+ *     {
+ *       "keyword": "Prestige",
+ *       "title": "Prestige",
+ *       "description": "A measure of your realm's renown.",
+ *       "icon": "icons/prestige.png",
+ *       "color": [255, 215, 0, 255]
+ *     },
+ *     {
+ *       "keyword": "Casus Belli",
+ *       "title": "Casus Belli",
+ *       "description": "A justification for declaring war."
+ *     }
+ *   ]
+ *
+ * The engine also auto-loads "keywords.json" from the working directory
+ * on startup if the file exists.
+ */
+uint32_t     teleology_keyword_load_file(TeleologyEngine* engine, const char* path);
+/* Save current keywords to a JSON file (pretty-printed). */
+uint8_t      teleology_keyword_save_file(TeleologyEngine* engine, const char* path);
+
 /* --- Raycasting / coordinate conversion (screen <-> world <-> tile) ---
  *
  * The engine maintains a Viewport resource describing the current map view
