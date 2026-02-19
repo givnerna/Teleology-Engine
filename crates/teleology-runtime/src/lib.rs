@@ -11,8 +11,8 @@ use std::sync::Arc;
 use teleology_core::{
     publish_event, ArmyComposition, ArmyRegistry, EventBus, EventScopeRef,
     ActiveEvent, EventChoice, EventDefinition, EventId, EventPopupStyle, EventQueue,
-    EventRegistry, EventScope, EventTemplate, PopupAnchor, queue_event,
-    register_builtin_templates,
+    EventRegistry, EventScope, EventTemplate, KeywordEntry, KeywordRegistry,
+    PopupAnchor, queue_event, register_builtin_templates,
     GameDate, GameWorld, NationId, NationTags, ProvinceId, ProvinceStore, ProvinceTags,
     ProgressState, ProgressTrees, SimulationSchedule, TagId, TagRegistry, TagTypeId, WorldBuilder,
     WorldBounds, WorldSimulation,
@@ -558,6 +558,7 @@ fn ensure_event_system(world: &mut GameWorld) {
         world.insert_resource(EventQueue::default());
         world.insert_resource(ActiveEvent::default());
         world.insert_resource(EventPopupStyle::default());
+        world.insert_resource(KeywordRegistry::default());
     }
 }
 
@@ -952,6 +953,111 @@ pub extern "C" fn teleology_event_register_templates(
             unsafe { *ids_out.add(i) = id.raw(); }
         }
     }
+}
+
+// --- Keyword tooltip system ---
+
+/// Register a keyword with a title and description. When the keyword appears
+/// in event text, it will be highlighted and show a tooltip on hover.
+/// Returns the keyword index (for later removal), or 0xFFFFFFFF on failure.
+#[no_mangle]
+pub extern "C" fn teleology_keyword_add(
+    engine: *mut TeleologyEngine,
+    keyword: *const std::ffi::c_char,
+    title: *const std::ffi::c_char,
+    description: *const std::ffi::c_char,
+) -> u32 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return u32::MAX };
+    let keyword = if keyword.is_null() { String::new() } else {
+        unsafe { CStr::from_ptr(keyword) }.to_string_lossy().into_owned()
+    };
+    let title = if title.is_null() { String::new() } else {
+        unsafe { CStr::from_ptr(title) }.to_string_lossy().into_owned()
+    };
+    let description = if description.is_null() { String::new() } else {
+        unsafe { CStr::from_ptr(description) }.to_string_lossy().into_owned()
+    };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_event_system(world);
+    let Some(mut reg) = world.get_resource_mut::<KeywordRegistry>() else { return u32::MAX };
+    reg.add(KeywordEntry {
+        keyword,
+        title,
+        description,
+        icon: String::new(),
+        color: [0, 0, 0, 0],
+    }) as u32
+}
+
+/// Set the icon (image path) for a keyword. Returns 1 on success, 0 on failure.
+#[no_mangle]
+pub extern "C" fn teleology_keyword_set_icon(
+    engine: *mut TeleologyEngine,
+    index: u32,
+    path: *const std::ffi::c_char,
+) -> u8 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0 };
+    let path = if path.is_null() { String::new() } else {
+        unsafe { CStr::from_ptr(path) }.to_string_lossy().into_owned()
+    };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_event_system(world);
+    let Some(mut reg) = world.get_resource_mut::<KeywordRegistry>() else { return 0 };
+    let Some(entry) = reg.entries.get_mut(index as usize) else { return 0 };
+    entry.icon = path;
+    1
+}
+
+/// Set the highlight color (RGBA) for a keyword in text.
+/// Pass r=0,g=0,b=0,a=0 to use the default highlight color.
+/// Returns 1 on success, 0 on failure.
+#[no_mangle]
+pub extern "C" fn teleology_keyword_set_color(
+    engine: *mut TeleologyEngine,
+    index: u32,
+    r: u8, g: u8, b: u8, a: u8,
+) -> u8 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0 };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_event_system(world);
+    let Some(mut reg) = world.get_resource_mut::<KeywordRegistry>() else { return 0 };
+    let Some(entry) = reg.entries.get_mut(index as usize) else { return 0 };
+    entry.color = [r, g, b, a];
+    1
+}
+
+/// Remove a keyword by index. Returns 1 on success, 0 on failure.
+#[no_mangle]
+pub extern "C" fn teleology_keyword_remove(
+    engine: *mut TeleologyEngine,
+    index: u32,
+) -> u8 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0 };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_event_system(world);
+    let Some(mut reg) = world.get_resource_mut::<KeywordRegistry>() else { return 0 };
+    if reg.remove(index as usize) { 1 } else { 0 }
+}
+
+/// Remove all keywords.
+#[no_mangle]
+pub extern "C" fn teleology_keyword_clear(engine: *mut TeleologyEngine) {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_event_system(world);
+    if let Some(mut reg) = world.get_resource_mut::<KeywordRegistry>() {
+        reg.clear();
+    }
+}
+
+/// Get the number of registered keywords.
+#[no_mangle]
+pub extern "C" fn teleology_keyword_count(engine: *mut TeleologyEngine) -> u32 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0 };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_event_system(world);
+    let Some(reg) = world.get_resource::<KeywordRegistry>() else { return 0 };
+    reg.entries.len() as u32
 }
 
 // --- Progress trees (nation scope; optional; lazy-init on first API use) ---

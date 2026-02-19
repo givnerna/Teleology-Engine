@@ -400,6 +400,88 @@ impl EventTemplate {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Keyword tooltip system
+// ---------------------------------------------------------------------------
+
+/// A single keyword entry: when this keyword appears in event text,
+/// it becomes hoverable and shows the description in a tooltip panel.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct KeywordEntry {
+    /// The keyword string to match in text (case-insensitive matching).
+    pub keyword: String,
+    /// Short title shown at the top of the tooltip.
+    pub title: String,
+    /// Longer description body shown in the tooltip panel.
+    pub description: String,
+    /// Optional icon/image path displayed in the tooltip.
+    pub icon: String,
+    /// Highlight color for the keyword in text (RGBA). [0,0,0,0] = use default.
+    pub color: [u8; 4],
+}
+
+/// Global keyword registry. Scripts register keywords here and any event/UI
+/// text that contains them will render them as highlighted, hoverable spans.
+#[derive(Resource, Clone, Default, Serialize, Deserialize)]
+pub struct KeywordRegistry {
+    pub entries: Vec<KeywordEntry>,
+}
+
+impl KeywordRegistry {
+    /// Register a keyword. Returns its index.
+    pub fn add(&mut self, entry: KeywordEntry) -> usize {
+        let idx = self.entries.len();
+        self.entries.push(entry);
+        idx
+    }
+
+    /// Remove a keyword by index. Returns true if removed.
+    pub fn remove(&mut self, idx: usize) -> bool {
+        if idx < self.entries.len() {
+            self.entries.remove(idx);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Clear all keywords.
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    /// Find all keyword matches in a piece of text.
+    /// Returns (byte_start, byte_end, entry_index) sorted by position.
+    pub fn find_matches(&self, text: &str) -> Vec<(usize, usize, usize)> {
+        let lower = text.to_lowercase();
+        let mut matches = Vec::new();
+        for (i, entry) in self.entries.iter().enumerate() {
+            let kw = entry.keyword.to_lowercase();
+            if kw.is_empty() {
+                continue;
+            }
+            let mut start = 0;
+            while let Some(pos) = lower[start..].find(&kw) {
+                let abs = start + pos;
+                matches.push((abs, abs + kw.len(), i));
+                start = abs + kw.len();
+            }
+        }
+        // Sort by position, then prefer longer matches first at same position
+        matches.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
+        // Remove overlapping matches (greedy: keep first)
+        let mut filtered = Vec::new();
+        let mut end = 0usize;
+        for m in matches {
+            if m.0 >= end {
+                filtered.push(m);
+                end = m.1;
+            }
+        }
+        filtered
+    }
+}
+
 /// Register all built-in templates into an `EventRegistry`, returning
 /// the IDs so scripts can reference them. Returns (notification, binary,
 /// three_way, narrative, diplomatic).

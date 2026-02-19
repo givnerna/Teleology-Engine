@@ -256,6 +256,32 @@ void         teleology_event_style_set_image(TeleologyEngine* engine, const char
 /* width: 0=auto. modal: 1=pause game while showing. */
 void         teleology_event_style_set_layout(TeleologyEngine* engine, float width, uint8_t modal);
 
+/* --- Keyword tooltip system ---
+ *
+ * Register keywords that are automatically highlighted in event pop-up text.
+ * When the player hovers a keyword, a tooltip panel appears with its
+ * title, description, and optional icon.
+ *
+ * Example:
+ *   uint32_t idx = teleology_keyword_add(engine, "Prestige", "Prestige",
+ *       "A measure of your realm's renown. Affects diplomacy, vassal opinion, and succession.");
+ *   teleology_keyword_set_color(engine, idx, 255, 215, 0, 255);  // gold
+ *   teleology_keyword_set_icon(engine, idx, "icons/prestige.png");
+ */
+
+/* Add a keyword. Returns index (0xFFFFFFFF on failure). */
+uint32_t     teleology_keyword_add(TeleologyEngine* engine, const char* keyword, const char* title, const char* description);
+/* Set icon image for keyword tooltip. */
+uint8_t      teleology_keyword_set_icon(TeleologyEngine* engine, uint32_t index, const char* path);
+/* Set highlight color (RGBA) for keyword in text. 0,0,0,0 = default gold. */
+uint8_t      teleology_keyword_set_color(TeleologyEngine* engine, uint32_t index, uint8_t r, uint8_t g, uint8_t b, uint8_t a);
+/* Remove a keyword by index. */
+uint8_t      teleology_keyword_remove(TeleologyEngine* engine, uint32_t index);
+/* Remove all keywords. */
+void         teleology_keyword_clear(TeleologyEngine* engine);
+/* Get the number of registered keywords. */
+uint32_t     teleology_keyword_count(TeleologyEngine* engine);
+
 /* --- Raycasting / coordinate conversion (screen <-> world <-> tile) ---
  *
  * The engine maintains a Viewport resource describing the current map view

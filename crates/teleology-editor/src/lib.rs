@@ -10,7 +10,7 @@ use teleology_core::{
     add_province_to_world, compute_adjacency, pull_next_event, queue_event,
     register_builtin_templates, ArmyComposition,
     ArmyRegistry, CharacterGenConfig, EventBus, EventPopupStyle, EventQueue, EventRegistry,
-    EventTemplate, GameDate, GameTime, PopupAnchor,
+    EventTemplate, GameDate, GameTime, KeywordRegistry, PopupAnchor,
     MapFile, MapKind, NationId, NationModifiers, NationStore, NationTags, ProgressState,
     ProgressTrees, ProvinceId, ProvinceModifiers, ProvinceStore, ProvinceTags, TagId, TagRegistry,
     TagTypeId, TickUnit, TimeConfig, Army, spawn_army, ActiveEvent, WorldBounds,
@@ -362,6 +362,108 @@ fn collect_folders(root: &std::path::Path) -> Vec<std::path::PathBuf> {
     }
     result.sort();
     result
+}
+
+/// Default keyword highlight color (golden underline).
+const KEYWORD_DEFAULT_COLOR: egui::Color32 = egui::Color32::from_rgb(255, 200, 80);
+
+/// Render text with keyword highlighting and hover tooltips.
+/// Keywords found in `text` are rendered as colored, underlined spans.
+/// Hovering a keyword shows a tooltip panel with its title, description, and optional icon.
+fn render_keyword_text(
+    ui: &mut egui::Ui,
+    text: &str,
+    font: egui::FontId,
+    text_color: egui::Color32,
+    keywords: &teleology_core::KeywordRegistry,
+    thumbnails: &mut std::collections::HashMap<std::path::PathBuf, egui::TextureHandle>,
+    ctx: &egui::Context,
+) {
+    let matches = keywords.find_matches(text);
+    if matches.is_empty() {
+        // No keywords — plain label
+        ui.label(egui::RichText::new(text).font(font).color(text_color));
+        return;
+    }
+
+    // Render as a horizontal_wrapped layout with mixed spans
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        let mut cursor = 0usize;
+        for (start, end, entry_idx) in &matches {
+            // Plain text before this keyword
+            if *start > cursor {
+                let plain = &text[cursor..*start];
+                ui.label(egui::RichText::new(plain).font(font.clone()).color(text_color));
+            }
+            // Keyword span
+            let kw_text = &text[*start..*end];
+            let entry = &keywords.entries[*entry_idx];
+            let kw_color = if entry.color[3] > 0 {
+                egui::Color32::from_rgba_unmultiplied(
+                    entry.color[0], entry.color[1], entry.color[2], entry.color[3],
+                )
+            } else {
+                KEYWORD_DEFAULT_COLOR
+            };
+            let resp = ui.add(
+                egui::Label::new(
+                    egui::RichText::new(kw_text)
+                        .font(font.clone())
+                        .color(kw_color)
+                        .underline()
+                )
+                .sense(egui::Sense::hover()),
+            );
+            if resp.hovered() {
+                egui::show_tooltip_at_pointer(ctx, ui.layer_id(), egui::Id::new(("kw_tip", *entry_idx)), |ui| {
+                    ui.set_max_width(300.0);
+                    let frame = egui::Frame::default()
+                        .inner_margin(egui::Margin::same(8.0))
+                        .rounding(4.0)
+                        .fill(egui::Color32::from_rgba_unmultiplied(20, 20, 30, 240))
+                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_gray(80)));
+                    frame.show(ui, |ui| {
+                        // Icon + title row
+                        ui.horizontal(|ui| {
+                            if !entry.icon.is_empty() {
+                                let icon_path = std::path::Path::new(&entry.icon);
+                                if !thumbnails.contains_key(icon_path) {
+                                    if let Some(tex) = load_image_texture(ctx, icon_path) {
+                                        thumbnails.insert(icon_path.to_path_buf(), tex);
+                                    }
+                                }
+                                if let Some(tex) = thumbnails.get(icon_path) {
+                                    let size = egui::vec2(20.0, 20.0);
+                                    ui.image(egui::load::SizedTexture::new(tex.id(), size));
+                                }
+                            }
+                            ui.label(
+                                egui::RichText::new(&entry.title)
+                                    .strong()
+                                    .color(kw_color)
+                                    .font(egui::FontId::proportional(14.0)),
+                            );
+                        });
+                        ui.add_space(4.0);
+                        ui.separator();
+                        ui.add_space(4.0);
+                        ui.label(
+                            egui::RichText::new(&entry.description)
+                                .color(egui::Color32::from_gray(200))
+                                .font(egui::FontId::proportional(12.0)),
+                        );
+                    });
+                });
+            }
+            cursor = *end;
+        }
+        // Trailing plain text
+        if cursor < text.len() {
+            let tail = &text[cursor..];
+            ui.label(egui::RichText::new(tail).font(font).color(text_color));
+        }
+    });
 }
 
 /// Recursively copy a directory and its contents to a new location.
@@ -3273,6 +3375,10 @@ impl EditorApp {
                         .get_resource::<EventPopupStyle>()
                         .cloned()
                         .unwrap_or_default();
+                    let kw_reg = world
+                        .get_resource::<KeywordRegistry>()
+                        .cloned()
+                        .unwrap_or_default();
 
                     if let (Some(inst), Some(def)) = (inst, def) {
                         let mut chosen_next: Option<teleology_core::EventId> = None;
@@ -3368,13 +3474,19 @@ impl EditorApp {
                                 ui.add_space(6.0);
                             }
 
-                            // Body
+                            // Body (with keyword highlighting)
                             let [dr, dg, db, da] = style.body_color;
                             let body_size = if style.body_font_size > 0.0 { style.body_font_size } else { 14.0 };
-                            ui.label(
-                                egui::RichText::new(&def.body)
-                                    .font(egui::FontId::proportional(body_size))
-                                    .color(egui::Color32::from_rgba_unmultiplied(dr, dg, db, da)),
+                            let body_color = egui::Color32::from_rgba_unmultiplied(dr, dg, db, da);
+                            let body_font = egui::FontId::proportional(body_size);
+                            render_keyword_text(
+                                ui,
+                                &def.body,
+                                body_font,
+                                body_color,
+                                &kw_reg,
+                                &mut self.project_thumbnails,
+                                ctx,
                             );
                             ui.add_space(10.0);
 
