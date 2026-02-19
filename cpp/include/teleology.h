@@ -188,6 +188,72 @@ uint8_t      teleology_ui_prefab_load(TeleologyEngine* engine, const char* path)
 uint8_t      teleology_ui_prefab_save_all(TeleologyEngine* engine, const char* path);
 uint8_t      teleology_ui_prefab_load_all(TeleologyEngine* engine, const char* path);
 
+/* --- Pop-up events (define, queue, display, choose) ---
+ *
+ * Scripts can define events at runtime, queue them for display, and handle
+ * the player's choice. The engine renders styled pop-up windows.
+ *
+ * Basic workflow:
+ *   // In on_init: define events (or use templates)
+ *   uint32_t evt = teleology_event_define(engine, "Rebellion!", "Peasants revolt in your lands.");
+ *   teleology_event_add_choice(engine, evt, "Crush them", 0);
+ *   teleology_event_add_choice(engine, evt, "Negotiate", 0);
+ *
+ *   // In on_daily_tick: queue when conditions met
+ *   teleology_event_queue(engine, evt, 0, 0);  // global scope
+ *
+ *   // In on_daily_tick: check for player response
+ *   uint32_t choices;
+ *   uint32_t active = teleology_event_get_active(engine, &choices);
+ *   if (active != 0) {
+ *       // Event is showing — player hasn't chosen yet
+ *       // (or call teleology_event_choose to auto-resolve from script)
+ *   }
+ *
+ * Templates (ready-made events you can customize):
+ *   uint32_t ids[5];
+ *   teleology_event_register_templates(engine, ids);
+ *   // ids: [0]=Notification, [1]=BinaryChoice, [2]=ThreeWay, [3]=Narrative, [4]=Diplomatic
+ *   teleology_event_set_title(engine, ids[0], "Custom Title");
+ *   teleology_event_set_body(engine, ids[0], "Custom body text.");
+ *   teleology_event_queue(engine, ids[0], 0, 0);
+ */
+
+/* Event definition */
+uint32_t     teleology_event_define(TeleologyEngine* engine, const char* title, const char* body);
+/* Template: 0=Notification, 1=BinaryChoice, 2=ThreeWay, 3=Narrative, 4=Diplomatic */
+uint32_t     teleology_event_from_template(TeleologyEngine* engine, uint32_t template);
+int32_t      teleology_event_add_choice(TeleologyEngine* engine, uint32_t event_id, const char* text, uint32_t next_event_id);
+uint8_t      teleology_event_set_choice_text(TeleologyEngine* engine, uint32_t event_id, uint32_t choice_idx, const char* text);
+uint8_t      teleology_event_set_title(TeleologyEngine* engine, uint32_t event_id, const char* title);
+uint8_t      teleology_event_set_body(TeleologyEngine* engine, uint32_t event_id, const char* body);
+
+/* Event lifecycle */
+/* scope_type: 0=Global, 1=Province, 2=Nation, 3=Character, 4=Army */
+void         teleology_event_queue(TeleologyEngine* engine, uint32_t event_id, uint32_t scope_type, uint32_t scope_raw);
+/* Returns active event_id (0 if none). Writes choice count to out. */
+uint32_t     teleology_event_get_active(TeleologyEngine* engine, uint32_t* choice_count_out);
+/* field: 0=title, 1=body. Writes NUL-terminated; returns full length. */
+uint32_t     teleology_event_get_text(TeleologyEngine* engine, uint32_t field, char* out, uint32_t out_cap);
+uint32_t     teleology_event_get_choice_text(TeleologyEngine* engine, uint32_t choice_idx, char* out, uint32_t out_cap);
+/* Choose an option (0-based). Clears active event and chains to next. */
+uint8_t      teleology_event_choose(TeleologyEngine* engine, uint32_t choice_idx);
+
+/* Register all 5 built-in templates. Writes 5 event IDs to ids_out. */
+void         teleology_event_register_templates(TeleologyEngine* engine, uint32_t* ids_out);
+
+/* Pop-up styling (set before queueing; applies to next displayed event) */
+void         teleology_event_style_reset(TeleologyEngine* engine);
+/* anchor: 0=Center, 1=Fixed(x,y) */
+void         teleology_event_style_set_anchor(TeleologyEngine* engine, uint32_t anchor, float x, float y);
+void         teleology_event_style_set_colors(TeleologyEngine* engine,
+                uint8_t bg_r, uint8_t bg_g, uint8_t bg_b, uint8_t bg_a,
+                uint8_t title_r, uint8_t title_g, uint8_t title_b, uint8_t title_a,
+                uint8_t body_r, uint8_t body_g, uint8_t body_b, uint8_t body_a);
+void         teleology_event_style_set_image(TeleologyEngine* engine, const char* path, float w, float h);
+/* width: 0=auto. modal: 1=pause game while showing. */
+void         teleology_event_style_set_layout(TeleologyEngine* engine, float width, uint8_t modal);
+
 /* --- Raycasting / coordinate conversion (screen <-> world <-> tile) ---
  *
  * The engine maintains a Viewport resource describing the current map view

@@ -201,3 +201,198 @@ pub fn pull_next_event(world: &mut World) {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Pop-up styling
+// ---------------------------------------------------------------------------
+
+/// How the event pop-up should be positioned.
+#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum PopupAnchor {
+    /// Centered in the window (default).
+    Center,
+    /// Fixed position (top-left corner of the popup).
+    Fixed { x: f32, y: f32 },
+}
+
+impl Default for PopupAnchor {
+    fn default() -> Self {
+        Self::Center
+    }
+}
+
+/// Visual style for event pop-ups. Scripts set this before queueing an event
+/// and it applies to the next pop-up shown.
+#[derive(Resource, Clone, Serialize, Deserialize)]
+pub struct EventPopupStyle {
+    /// Where to anchor the popup window.
+    pub anchor: PopupAnchor,
+    /// Popup width (0 = auto).
+    pub width: f32,
+    /// Background color (RGBA).
+    pub bg_color: [u8; 4],
+    /// Title text color.
+    pub title_color: [u8; 4],
+    /// Body text color.
+    pub body_color: [u8; 4],
+    /// Button text color.
+    pub button_color: [u8; 4],
+    /// Optional image path to show above the body text.
+    pub image_path: String,
+    /// Image dimensions (if image_path is set).
+    pub image_w: f32,
+    pub image_h: f32,
+    /// Whether the game should pause while this event is showing.
+    pub modal: bool,
+    /// Title font size (0 = default).
+    pub title_font_size: f32,
+    /// Body font size (0 = default).
+    pub body_font_size: f32,
+}
+
+impl Default for EventPopupStyle {
+    fn default() -> Self {
+        Self {
+            anchor: PopupAnchor::Center,
+            width: 0.0,
+            bg_color: [30, 30, 40, 230],
+            title_color: [255, 220, 120, 255],
+            body_color: [220, 220, 220, 255],
+            button_color: [200, 200, 255, 255],
+            image_path: String::new(),
+            image_w: 0.0,
+            image_h: 0.0,
+            modal: true,
+            title_font_size: 0.0,
+            body_font_size: 0.0,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Built-in event templates
+// ---------------------------------------------------------------------------
+
+/// Pre-made event template identifiers. Scripts can instantiate these
+/// to quickly create common event patterns, then customize as needed.
+pub enum EventTemplate {
+    /// Simple notification: title + body + "OK" button.
+    Notification,
+    /// Binary choice: title + body + 2 buttons (Accept/Decline).
+    BinaryChoice,
+    /// Three-way: title + body + 3 buttons.
+    ThreeWayChoice,
+    /// Narrative event: title + body + "Continue" (chains to next_event).
+    Narrative,
+    /// Diplomatic proposal: title + body + Accept/Decline/Negotiate.
+    DiplomaticProposal,
+}
+
+impl EventTemplate {
+    /// Create an `EventDefinition` from this template. The caller should
+    /// customize the returned definition (change title, body, choice text, etc.)
+    /// and then insert it into the `EventRegistry`.
+    pub fn create(&self) -> EventDefinition {
+        match self {
+            EventTemplate::Notification => EventDefinition {
+                id: EventId(NonZeroU32::new(1).unwrap()), // placeholder; registry reassigns
+                title: "Notification".into(),
+                body: "Something has happened in your realm.".into(),
+                choices: vec![EventChoice {
+                    text: "Acknowledged".into(),
+                    next_event: None,
+                    effects_payload: Vec::new(),
+                }],
+            },
+            EventTemplate::BinaryChoice => EventDefinition {
+                id: EventId(NonZeroU32::new(1).unwrap()),
+                title: "A Decision Awaits".into(),
+                body: "You must choose between two paths.".into(),
+                choices: vec![
+                    EventChoice {
+                        text: "Accept".into(),
+                        next_event: None,
+                        effects_payload: Vec::new(),
+                    },
+                    EventChoice {
+                        text: "Decline".into(),
+                        next_event: None,
+                        effects_payload: Vec::new(),
+                    },
+                ],
+            },
+            EventTemplate::ThreeWayChoice => EventDefinition {
+                id: EventId(NonZeroU32::new(1).unwrap()),
+                title: "A Complex Situation".into(),
+                body: "Three options present themselves.".into(),
+                choices: vec![
+                    EventChoice {
+                        text: "Option A".into(),
+                        next_event: None,
+                        effects_payload: Vec::new(),
+                    },
+                    EventChoice {
+                        text: "Option B".into(),
+                        next_event: None,
+                        effects_payload: Vec::new(),
+                    },
+                    EventChoice {
+                        text: "Option C".into(),
+                        next_event: None,
+                        effects_payload: Vec::new(),
+                    },
+                ],
+            },
+            EventTemplate::Narrative => EventDefinition {
+                id: EventId(NonZeroU32::new(1).unwrap()),
+                title: "A Tale Unfolds".into(),
+                body: "The story continues...".into(),
+                choices: vec![EventChoice {
+                    text: "Continue".into(),
+                    next_event: None,
+                    effects_payload: Vec::new(),
+                }],
+            },
+            EventTemplate::DiplomaticProposal => EventDefinition {
+                id: EventId(NonZeroU32::new(1).unwrap()),
+                title: "Diplomatic Proposal".into(),
+                body: "A foreign power approaches with a proposition.".into(),
+                choices: vec![
+                    EventChoice {
+                        text: "Accept".into(),
+                        next_event: None,
+                        effects_payload: Vec::new(),
+                    },
+                    EventChoice {
+                        text: "Decline".into(),
+                        next_event: None,
+                        effects_payload: Vec::new(),
+                    },
+                    EventChoice {
+                        text: "Negotiate".into(),
+                        next_event: None,
+                        effects_payload: Vec::new(),
+                    },
+                ],
+            },
+        }
+    }
+}
+
+/// Register all built-in templates into an `EventRegistry`, returning
+/// the IDs so scripts can reference them. Returns (notification, binary,
+/// three_way, narrative, diplomatic).
+pub fn register_builtin_templates(reg: &mut EventRegistry) -> [EventId; 5] {
+    let templates = [
+        EventTemplate::Notification,
+        EventTemplate::BinaryChoice,
+        EventTemplate::ThreeWayChoice,
+        EventTemplate::Narrative,
+        EventTemplate::DiplomaticProposal,
+    ];
+    let mut ids = [EventId(NonZeroU32::new(1).unwrap()); 5];
+    for (i, tmpl) in templates.iter().enumerate() {
+        ids[i] = reg.insert(tmpl.create());
+    }
+    ids
+}

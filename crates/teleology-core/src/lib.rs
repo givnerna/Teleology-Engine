@@ -46,8 +46,9 @@ pub use economy::{
     ProvinceEconomy, TradeNetwork, TradeNode, TradeNodeId,
 };
 pub use events::{
-    queue_event, pull_next_event, ActiveEvent, EventChoice, EventDefinition, EventId, EventInstance,
-    EventQueue, EventRegistry, EventScope,
+    queue_event, pull_next_event, register_builtin_templates, ActiveEvent, EventChoice,
+    EventDefinition, EventId, EventInstance, EventPopupStyle, EventQueue, EventRegistry,
+    EventScope, EventTemplate, PopupAnchor,
 };
 pub use event_bus::{
     publish_event, EntityScopeRef, EventBus, EventEnvelope, EventPayload, EventScopeRef,

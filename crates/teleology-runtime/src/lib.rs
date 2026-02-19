@@ -10,6 +10,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use teleology_core::{
     publish_event, ArmyComposition, ArmyRegistry, EventBus, EventScopeRef,
+    ActiveEvent, EventChoice, EventDefinition, EventId, EventPopupStyle, EventQueue,
+    EventRegistry, EventScope, EventTemplate, PopupAnchor, queue_event,
+    register_builtin_templates,
     GameDate, GameWorld, NationId, NationTags, ProvinceId, ProvinceStore, ProvinceTags,
     ProgressState, ProgressTrees, SimulationSchedule, TagId, TagRegistry, TagTypeId, WorldBuilder,
     WorldBounds, WorldSimulation,
@@ -545,6 +548,382 @@ pub extern "C" fn teleology_eventbus_topic_name(
         *out.add(n) = 0;
     }
     name.len() as u32
+}
+
+// --- Pop-up events (define, queue, display, choose; lazy-init) ---
+
+fn ensure_event_system(world: &mut GameWorld) {
+    if world.get_resource::<EventRegistry>().is_none() {
+        world.insert_resource(EventRegistry::new());
+        world.insert_resource(EventQueue::default());
+        world.insert_resource(ActiveEvent::default());
+        world.insert_resource(EventPopupStyle::default());
+    }
+}
+
+/// Define a new event. Returns the event_id (0 on failure).
+#[no_mangle]
+pub extern "C" fn teleology_event_define(
+    engine: *mut TeleologyEngine,
+    title: *const std::ffi::c_char,
+    body: *const std::ffi::c_char,
+) -> u32 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0 };
+    let title = if title.is_null() { String::new() } else {
+        unsafe { CStr::from_ptr(title) }.to_string_lossy().into_owned()
+    };
+    let body = if body.is_null() { String::new() } else {
+        unsafe { CStr::from_ptr(body) }.to_string_lossy().into_owned()
+    };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_event_system(world);
+    let Some(mut reg) = world.get_resource_mut::<EventRegistry>() else { return 0 };
+    let def = EventDefinition {
+        id: EventId(NonZeroU32::new(1).unwrap()), // placeholder; insert() reassigns
+        title,
+        body,
+        choices: Vec::new(),
+    };
+    reg.insert(def).raw()
+}
+
+/// Create a new event from a built-in template. Returns the event_id.
+/// template: 0=Notification, 1=BinaryChoice, 2=ThreeWayChoice, 3=Narrative, 4=DiplomaticProposal.
+#[no_mangle]
+pub extern "C" fn teleology_event_from_template(
+    engine: *mut TeleologyEngine,
+    template: u32,
+) -> u32 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0 };
+    let tmpl = match template {
+        0 => EventTemplate::Notification,
+        1 => EventTemplate::BinaryChoice,
+        2 => EventTemplate::ThreeWayChoice,
+        3 => EventTemplate::Narrative,
+        4 => EventTemplate::DiplomaticProposal,
+        _ => return 0,
+    };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_event_system(world);
+    let Some(mut reg) = world.get_resource_mut::<EventRegistry>() else { return 0 };
+    reg.insert(tmpl.create()).raw()
+}
+
+/// Add a choice to an event. Returns the choice index (0-based), or -1 on failure.
+#[no_mangle]
+pub extern "C" fn teleology_event_add_choice(
+    engine: *mut TeleologyEngine,
+    event_id: u32,
+    text: *const std::ffi::c_char,
+    next_event_id: u32,
+) -> i32 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return -1 };
+    let text = if text.is_null() { String::new() } else {
+        unsafe { CStr::from_ptr(text) }.to_string_lossy().into_owned()
+    };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_event_system(world);
+    let Some(mut reg) = world.get_resource_mut::<EventRegistry>() else { return -1 };
+    let Some(def) = reg.events.get_mut(&event_id) else { return -1 };
+    let next = NonZeroU32::new(next_event_id).map(EventId);
+    let idx = def.choices.len();
+    def.choices.push(EventChoice {
+        text,
+        next_event: next,
+        effects_payload: Vec::new(),
+    });
+    idx as i32
+}
+
+/// Set the text of an existing choice. Returns 1 on success, 0 on failure.
+#[no_mangle]
+pub extern "C" fn teleology_event_set_choice_text(
+    engine: *mut TeleologyEngine,
+    event_id: u32,
+    choice_idx: u32,
+    text: *const std::ffi::c_char,
+) -> u8 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0 };
+    let text = if text.is_null() { String::new() } else {
+        unsafe { CStr::from_ptr(text) }.to_string_lossy().into_owned()
+    };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_event_system(world);
+    let Some(mut reg) = world.get_resource_mut::<EventRegistry>() else { return 0 };
+    let Some(def) = reg.events.get_mut(&event_id) else { return 0 };
+    let Some(ch) = def.choices.get_mut(choice_idx as usize) else { return 0 };
+    ch.text = text;
+    1
+}
+
+/// Set the title of an existing event. Returns 1 on success, 0 on failure.
+#[no_mangle]
+pub extern "C" fn teleology_event_set_title(
+    engine: *mut TeleologyEngine,
+    event_id: u32,
+    title: *const std::ffi::c_char,
+) -> u8 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0 };
+    let title = if title.is_null() { String::new() } else {
+        unsafe { CStr::from_ptr(title) }.to_string_lossy().into_owned()
+    };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_event_system(world);
+    let Some(mut reg) = world.get_resource_mut::<EventRegistry>() else { return 0 };
+    let Some(def) = reg.events.get_mut(&event_id) else { return 0 };
+    def.title = title;
+    1
+}
+
+/// Set the body of an existing event. Returns 1 on success, 0 on failure.
+#[no_mangle]
+pub extern "C" fn teleology_event_set_body(
+    engine: *mut TeleologyEngine,
+    event_id: u32,
+    body: *const std::ffi::c_char,
+) -> u8 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0 };
+    let body = if body.is_null() { String::new() } else {
+        unsafe { CStr::from_ptr(body) }.to_string_lossy().into_owned()
+    };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_event_system(world);
+    let Some(mut reg) = world.get_resource_mut::<EventRegistry>() else { return 0 };
+    let Some(def) = reg.events.get_mut(&event_id) else { return 0 };
+    def.body = body;
+    1
+}
+
+/// Queue an event for display as a pop-up.
+/// scope_type: 0=Global, 1=Province, 2=Nation, 3=Character, 4=Army.
+/// scope_raw: entity id for scoped events (0 for global).
+#[no_mangle]
+pub extern "C" fn teleology_event_queue(
+    engine: *mut TeleologyEngine,
+    event_id: u32,
+    scope_type: u32,
+    scope_raw: u32,
+) {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return };
+    let Some(eid) = NonZeroU32::new(event_id) else { return };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_event_system(world);
+    let scope = EventScope { scope_type, raw: scope_raw, raw_hi: 0 };
+    queue_event(world, EventId(eid), scope, Vec::new());
+}
+
+/// Get the active event. Returns event_id (0 if no active event).
+/// Writes the choice count to choice_count_out.
+#[no_mangle]
+pub extern "C" fn teleology_event_get_active(
+    engine: *mut TeleologyEngine,
+    choice_count_out: *mut u32,
+) -> u32 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0 };
+    let world = unsafe { &*ctx.world.get() };
+    let Some(active) = world.get_resource::<ActiveEvent>() else { return 0 };
+    let Some(inst) = &active.current else { return 0 };
+    let eid = inst.event_id.raw();
+    if !choice_count_out.is_null() {
+        let count = world.get_resource::<EventRegistry>()
+            .and_then(|r| r.get(inst.event_id))
+            .map(|d| d.choices.len() as u32)
+            .unwrap_or(0);
+        unsafe { *choice_count_out = count; }
+    }
+    eid
+}
+
+/// Get text of the active event (title or body).
+/// field: 0=title, 1=body.
+/// Writes NUL-terminated string to out, returns full length.
+#[no_mangle]
+pub extern "C" fn teleology_event_get_text(
+    engine: *mut TeleologyEngine,
+    field: u32,
+    out: *mut std::ffi::c_char,
+    out_cap: u32,
+) -> u32 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0 };
+    let world = unsafe { &*ctx.world.get() };
+    let Some(active) = world.get_resource::<ActiveEvent>() else { return 0 };
+    let Some(inst) = &active.current else { return 0 };
+    let Some(reg) = world.get_resource::<EventRegistry>() else { return 0 };
+    let Some(def) = reg.get(inst.event_id) else { return 0 };
+    let text = match field {
+        0 => &def.title,
+        1 => &def.body,
+        _ => return 0,
+    };
+    if out.is_null() || out_cap == 0 { return text.len() as u32; }
+    let bytes = text.as_bytes();
+    let n = (out_cap as usize).saturating_sub(1).min(bytes.len());
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), out as *mut u8, n);
+        *out.add(n) = 0;
+    }
+    text.len() as u32
+}
+
+/// Get choice text for the active event.
+/// Writes NUL-terminated string to out, returns full length (0 if invalid).
+#[no_mangle]
+pub extern "C" fn teleology_event_get_choice_text(
+    engine: *mut TeleologyEngine,
+    choice_idx: u32,
+    out: *mut std::ffi::c_char,
+    out_cap: u32,
+) -> u32 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0 };
+    let world = unsafe { &*ctx.world.get() };
+    let Some(active) = world.get_resource::<ActiveEvent>() else { return 0 };
+    let Some(inst) = &active.current else { return 0 };
+    let Some(reg) = world.get_resource::<EventRegistry>() else { return 0 };
+    let Some(def) = reg.get(inst.event_id) else { return 0 };
+    let Some(ch) = def.choices.get(choice_idx as usize) else { return 0 };
+    let text = &ch.text;
+    if out.is_null() || out_cap == 0 { return text.len() as u32; }
+    let bytes = text.as_bytes();
+    let n = (out_cap as usize).saturating_sub(1).min(bytes.len());
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), out as *mut u8, n);
+        *out.add(n) = 0;
+    }
+    text.len() as u32
+}
+
+/// Choose an option for the active event. Clears it and chains to next if set.
+/// Returns 1 on success, 0 if no active event or invalid choice.
+#[no_mangle]
+pub extern "C" fn teleology_event_choose(
+    engine: *mut TeleologyEngine,
+    choice_idx: u32,
+) -> u8 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0 };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_event_system(world);
+    // Get the active event + definition
+    let (inst, next_event) = {
+        let Some(active) = world.get_resource::<ActiveEvent>() else { return 0 };
+        let Some(inst) = active.current.clone() else { return 0 };
+        let Some(reg) = world.get_resource::<EventRegistry>() else { return 0 };
+        let Some(def) = reg.get(inst.event_id) else { return 0 };
+        let Some(ch) = def.choices.get(choice_idx as usize) else { return 0 };
+        (inst, ch.next_event)
+    };
+    // Clear the active event
+    if let Some(mut active) = world.get_resource_mut::<ActiveEvent>() {
+        active.current = None;
+    }
+    // Chain to next event if set
+    if let Some(next) = next_event {
+        queue_event(world, next, inst.scope, inst.payload);
+    }
+    1
+}
+
+/// Set the pop-up style for the next event shown.
+#[no_mangle]
+pub extern "C" fn teleology_event_style_reset(engine: *mut TeleologyEngine) {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_event_system(world);
+    if let Some(mut style) = world.get_resource_mut::<EventPopupStyle>() {
+        *style = EventPopupStyle::default();
+    }
+}
+
+/// Set pop-up anchor: 0=Center, 1=Fixed(x,y).
+#[no_mangle]
+pub extern "C" fn teleology_event_style_set_anchor(
+    engine: *mut TeleologyEngine,
+    anchor: u32,
+    x: f32,
+    y: f32,
+) {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_event_system(world);
+    if let Some(mut style) = world.get_resource_mut::<EventPopupStyle>() {
+        style.anchor = match anchor {
+            0 => PopupAnchor::Center,
+            _ => PopupAnchor::Fixed { x, y },
+        };
+    }
+}
+
+/// Set pop-up background color.
+#[no_mangle]
+pub extern "C" fn teleology_event_style_set_colors(
+    engine: *mut TeleologyEngine,
+    bg_r: u8, bg_g: u8, bg_b: u8, bg_a: u8,
+    title_r: u8, title_g: u8, title_b: u8, title_a: u8,
+    body_r: u8, body_g: u8, body_b: u8, body_a: u8,
+) {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_event_system(world);
+    if let Some(mut style) = world.get_resource_mut::<EventPopupStyle>() {
+        style.bg_color = [bg_r, bg_g, bg_b, bg_a];
+        style.title_color = [title_r, title_g, title_b, title_a];
+        style.body_color = [body_r, body_g, body_b, body_a];
+    }
+}
+
+/// Set pop-up image (shown above body text). Pass NULL/empty to clear.
+#[no_mangle]
+pub extern "C" fn teleology_event_style_set_image(
+    engine: *mut TeleologyEngine,
+    path: *const std::ffi::c_char,
+    w: f32,
+    h: f32,
+) {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return };
+    let path = if path.is_null() { String::new() } else {
+        unsafe { CStr::from_ptr(path) }.to_string_lossy().into_owned()
+    };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_event_system(world);
+    if let Some(mut style) = world.get_resource_mut::<EventPopupStyle>() {
+        style.image_path = path;
+        style.image_w = w;
+        style.image_h = h;
+    }
+}
+
+/// Set pop-up width (0 = auto) and modal flag.
+#[no_mangle]
+pub extern "C" fn teleology_event_style_set_layout(
+    engine: *mut TeleologyEngine,
+    width: f32,
+    modal: u8,
+) {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_event_system(world);
+    if let Some(mut style) = world.get_resource_mut::<EventPopupStyle>() {
+        style.width = width;
+        style.modal = modal != 0;
+    }
+}
+
+/// Register all built-in event templates. Returns 5 event IDs via out pointer.
+/// Templates: [0]=Notification, [1]=BinaryChoice, [2]=ThreeWay, [3]=Narrative, [4]=Diplomatic.
+#[no_mangle]
+pub extern "C" fn teleology_event_register_templates(
+    engine: *mut TeleologyEngine,
+    ids_out: *mut u32,
+) {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_event_system(world);
+    let Some(mut reg) = world.get_resource_mut::<EventRegistry>() else { return };
+    let ids = register_builtin_templates(&mut reg);
+    if !ids_out.is_null() {
+        for (i, id) in ids.iter().enumerate() {
+            unsafe { *ids_out.add(i) = id.raw(); }
+        }
+    }
 }
 
 // --- Progress trees (nation scope; optional; lazy-init on first API use) ---

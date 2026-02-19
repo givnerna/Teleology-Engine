@@ -7,8 +7,10 @@ use std::num::NonZeroU32;
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
 use teleology_core::{
-    add_province_to_world, compute_adjacency, pull_next_event, queue_event, ArmyComposition,
-    ArmyRegistry, CharacterGenConfig, EventBus, EventQueue, EventRegistry, GameDate, GameTime,
+    add_province_to_world, compute_adjacency, pull_next_event, queue_event,
+    register_builtin_templates, ArmyComposition,
+    ArmyRegistry, CharacterGenConfig, EventBus, EventPopupStyle, EventQueue, EventRegistry,
+    EventTemplate, GameDate, GameTime, PopupAnchor,
     MapFile, MapKind, NationId, NationModifiers, NationStore, NationTags, ProgressState,
     ProgressTrees, ProvinceId, ProvinceModifiers, ProvinceStore, ProvinceTags, TagId, TagRegistry,
     TagTypeId, TickUnit, TimeConfig, Army, spawn_army, ActiveEvent, WorldBounds,
@@ -1996,6 +1998,51 @@ impl EditorApp {
                     self.pending_create_event = false;
                 }
 
+                // --- Template gallery ---
+                ui.add_space(4.0);
+                ui.collapsing("Templates", |ui| {
+                    ui.label(
+                        egui::RichText::new("Create from template (customize after):")
+                            .small()
+                            .color(ui.visuals().weak_text_color()),
+                    );
+                    ui.add_space(2.0);
+                    let templates: &[(&str, EventTemplate)] = &[
+                        ("Notification", EventTemplate::Notification),
+                        ("Binary Choice", EventTemplate::BinaryChoice),
+                        ("Three-Way", EventTemplate::ThreeWayChoice),
+                        ("Narrative", EventTemplate::Narrative),
+                        ("Diplomatic", EventTemplate::DiplomaticProposal),
+                    ];
+                    for (label, tmpl) in templates {
+                        if ui.button(*label).clicked() {
+                            if world.get_resource::<EventRegistry>().is_none() {
+                                world.insert_resource(EventRegistry::new());
+                                world.insert_resource(EventQueue::default());
+                                world.insert_resource(ActiveEvent::default());
+                                world.insert_resource(EventPopupStyle::default());
+                            }
+                            if let Some(mut reg) = world.get_resource_mut::<EventRegistry>() {
+                                let id = reg.insert(tmpl.create());
+                                self.event_selected_raw = Some(id.raw());
+                            }
+                        }
+                    }
+                    ui.add_space(2.0);
+                    if ui.button("Register all templates").on_hover_text("Create all 5 templates at once").clicked() {
+                        if world.get_resource::<EventRegistry>().is_none() {
+                            world.insert_resource(EventRegistry::new());
+                            world.insert_resource(EventQueue::default());
+                            world.insert_resource(ActiveEvent::default());
+                            world.insert_resource(EventPopupStyle::default());
+                        }
+                        if let Some(mut reg) = world.get_resource_mut::<EventRegistry>() {
+                            let ids = register_builtin_templates(&mut reg);
+                            self.event_selected_raw = Some(ids[0].raw());
+                        }
+                    }
+                });
+
                 // List events.
                 let ids: Vec<u32> = world
                     .get_resource::<EventRegistry>()
@@ -3219,24 +3266,122 @@ impl EditorApp {
                     let def = inst
                         .as_ref()
                         .and_then(|i| world.get_resource::<EventRegistry>().and_then(|r| r.get(i.event_id)).cloned());
+                    let style = world
+                        .get_resource::<EventPopupStyle>()
+                        .cloned()
+                        .unwrap_or_default();
 
                     if let (Some(inst), Some(def)) = (inst, def) {
                         let mut chosen_next: Option<teleology_core::EventId> = None;
                         let mut close = false;
-                        egui::Window::new(def.title.clone())
+
+                        // Build styled frame
+                        let [br, bg, bb, ba] = style.bg_color;
+                        let frame = egui::Frame::none()
+                            .fill(egui::Color32::from_rgba_unmultiplied(br, bg, bb, ba))
+                            .inner_margin(egui::Margin::same(12.0))
+                            .rounding(6.0)
+                            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(
+                                br.saturating_add(40), bg.saturating_add(40), bb.saturating_add(40), ba,
+                            )));
+
+                        let mut win = egui::Window::new("")
+                            .title_bar(false)
                             .collapsible(false)
                             .resizable(false)
-                            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                            .show(ctx, |ui| {
-                                ui.label(&def.body);
-                                ui.add_space(8.0);
-                                for ch in &def.choices {
-                                    if ui.button(&ch.text).clicked() {
-                                        close = true;
-                                        chosen_next = ch.next_event;
+                            .frame(frame);
+
+                        // Anchor / position
+                        match style.anchor {
+                            PopupAnchor::Center => {
+                                win = win.anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]);
+                            }
+                            PopupAnchor::Fixed { x, y } => {
+                                win = win.fixed_pos([x, y]);
+                            }
+                        }
+
+                        // Width
+                        if style.width > 0.0 {
+                            win = win.fixed_size([style.width, 0.0]);
+                        }
+
+                        win.show(ctx, |ui| {
+                            // Title
+                            let [tr, tg, tb, ta] = style.title_color;
+                            let title_size = if style.title_font_size > 0.0 { style.title_font_size } else { 18.0 };
+                            ui.label(
+                                egui::RichText::new(&def.title)
+                                    .font(egui::FontId::proportional(title_size))
+                                    .strong()
+                                    .color(egui::Color32::from_rgba_unmultiplied(tr, tg, tb, ta)),
+                            );
+                            ui.add_space(4.0);
+                            ui.separator();
+                            ui.add_space(4.0);
+
+                            // Image (if set)
+                            if !style.image_path.is_empty() {
+                                let img_w = if style.image_w > 0.0 { style.image_w } else { 200.0 };
+                                let img_h = if style.image_h > 0.0 { style.image_h } else { 100.0 };
+                                let (r, _) = ui.allocate_exact_size(
+                                    egui::vec2(img_w, img_h),
+                                    egui::Sense::hover(),
+                                );
+                                // Try to load image texture
+                                if !self.project_thumbnails.contains_key(std::path::Path::new(&style.image_path)) {
+                                    if let Some(tex) = load_image_texture(ctx, std::path::Path::new(&style.image_path)) {
+                                        self.project_thumbnails.insert(std::path::PathBuf::from(&style.image_path), tex);
                                     }
                                 }
-                            });
+                                if let Some(tex) = self.project_thumbnails.get(std::path::Path::new(&style.image_path)) {
+                                    ui.painter().image(
+                                        tex.id(),
+                                        r,
+                                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                                        egui::Color32::WHITE,
+                                    );
+                                } else {
+                                    ui.painter().rect_filled(
+                                        r,
+                                        4.0,
+                                        egui::Color32::from_rgba_unmultiplied(60, 60, 80, 180),
+                                    );
+                                    ui.painter().text(
+                                        r.center(),
+                                        egui::Align2::CENTER_CENTER,
+                                        &style.image_path,
+                                        egui::FontId::proportional(10.0),
+                                        egui::Color32::from_gray(140),
+                                    );
+                                }
+                                ui.add_space(6.0);
+                            }
+
+                            // Body
+                            let [dr, dg, db, da] = style.body_color;
+                            let body_size = if style.body_font_size > 0.0 { style.body_font_size } else { 14.0 };
+                            ui.label(
+                                egui::RichText::new(&def.body)
+                                    .font(egui::FontId::proportional(body_size))
+                                    .color(egui::Color32::from_rgba_unmultiplied(dr, dg, db, da)),
+                            );
+                            ui.add_space(10.0);
+
+                            // Choice buttons
+                            let [cr, cg, cb, _ca] = style.button_color;
+                            for ch in &def.choices {
+                                let btn = egui::Button::new(
+                                    egui::RichText::new(&ch.text)
+                                        .color(egui::Color32::from_rgb(cr, cg, cb)),
+                                );
+                                if ui.add_sized([ui.available_width(), 28.0], btn).clicked() {
+                                    close = true;
+                                    chosen_next = ch.next_event;
+                                }
+                                ui.add_space(2.0);
+                            }
+                        });
 
                         if close {
                             if let Some(mut active) = world.get_resource_mut::<ActiveEvent>() {
