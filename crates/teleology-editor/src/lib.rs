@@ -362,6 +362,22 @@ fn collect_folders(root: &std::path::Path) -> Vec<std::path::PathBuf> {
     result
 }
 
+/// Recursively copy a directory and its contents to a new location.
+fn copy_dir_recursive(src: &std::path::Path, dest: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dest)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let src_path = entry.path();
+        let dest_path = dest.join(entry.file_name());
+        if src_path.is_dir() {
+            copy_dir_recursive(&src_path, &dest_path)?;
+        } else {
+            std::fs::copy(&src_path, &dest_path)?;
+        }
+    }
+    Ok(())
+}
+
 /// Format file size for display.
 fn format_size(bytes: u64) -> String {
     if bytes < 1024 {
@@ -528,6 +544,12 @@ pub struct EditorApp {
     project_thumbnails: std::collections::HashMap<std::path::PathBuf, egui::TextureHandle>,
     /// Folder tree: all directories under resources/ (cached on scan).
     project_folders: Vec<std::path::PathBuf>,
+    /// Index of entry being dragged internally (file → folder move).
+    project_dragging: Option<usize>,
+    /// Status message for drag-and-drop operations (e.g. "Copied 3 files").
+    project_drop_status: String,
+    /// Tick counter for status message fade-out.
+    project_drop_status_ttl: u32,
 }
 
 impl EditorApp {
@@ -593,6 +615,9 @@ impl EditorApp {
             project_scanned: false,
             project_thumbnails: std::collections::HashMap::new(),
             project_folders: Vec::new(),
+            project_dragging: None,
+            project_drop_status: String::new(),
+            project_drop_status_ttl: 0,
         }
     }
 }
@@ -1171,11 +1196,79 @@ impl EditorApp {
             self.project_scanned = true;
         }
 
+        // --- OS file drag-and-drop: copy dropped files into current project directory ---
+        let dropped: Vec<egui::DroppedFile> = ctx.input(|i| i.raw.dropped_files.clone());
+        if !dropped.is_empty() {
+            let mut copied = 0u32;
+            for file in &dropped {
+                if let Some(src_path) = &file.path {
+                    if let Some(file_name) = src_path.file_name() {
+                        let dest = self.project_dir.join(file_name);
+                        if src_path.is_dir() {
+                            // Recursively copy directory
+                            if copy_dir_recursive(src_path, &dest).is_ok() {
+                                copied += 1;
+                            }
+                        } else if std::fs::copy(src_path, &dest).is_ok() {
+                            copied += 1;
+                        }
+                    }
+                } else if let Some(bytes) = &file.bytes {
+                    // Dropped from browser or clipboard — has bytes but no path
+                    let name = if file.name.is_empty() { "dropped_file" } else { &file.name };
+                    let dest = self.project_dir.join(name);
+                    if std::fs::write(&dest, bytes.as_ref()).is_ok() {
+                        copied += 1;
+                    }
+                }
+            }
+            if copied > 0 {
+                self.project_entries = scan_directory(&self.project_dir);
+                self.project_folders = collect_folders(&std::path::PathBuf::from("resources"));
+                self.project_selected = None;
+                self.project_drop_status = format!("Copied {} file{}", copied, if copied == 1 { "" } else { "s" });
+                self.project_drop_status_ttl = 180; // ~3 seconds at 60fps
+            }
+        }
+
+        // Tick down status message
+        if self.project_drop_status_ttl > 0 {
+            self.project_drop_status_ttl -= 1;
+            if self.project_drop_status_ttl == 0 {
+                self.project_drop_status.clear();
+            }
+        }
+
+        // Check if OS files are hovering over the window (for visual feedback)
+        let os_hovering = ctx.input(|i| !i.raw.hovered_files.is_empty());
+
         egui::TopBottomPanel::bottom("project_browser")
             .default_height(200.0)
             .resizable(true)
             .frame(panel_frame())
             .show(ctx, |ui| {
+                // --- Drop overlay: visual feedback when dragging files from OS ---
+                if os_hovering {
+                    let panel_rect = ui.max_rect();
+                    ui.painter().rect_filled(
+                        panel_rect,
+                        4.0,
+                        egui::Color32::from_rgba_unmultiplied(60, 120, 220, 40),
+                    );
+                    ui.painter().rect_stroke(
+                        panel_rect.shrink(2.0),
+                        4.0,
+                        egui::Stroke::new(2.0, egui::Color32::from_rgb(100, 160, 255)),
+                    );
+                    ui.painter().text(
+                        panel_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "Drop files here to import",
+                        egui::FontId::proportional(18.0),
+                        egui::Color32::from_rgb(180, 210, 255),
+                    );
+                }
+
                 // --- Top bar: breadcrumb + controls ---
                 ui.horizontal(|ui| {
                     ui.style_mut().spacing.item_spacing.x = 4.0;
@@ -1222,6 +1315,16 @@ impl EditorApp {
                         self.project_entries = scan_directory(&self.project_dir);
                         self.project_folders = collect_folders(&std::path::PathBuf::from("resources"));
                         self.project_selected = None;
+                    }
+
+                    // Drop status message (fades after a few seconds)
+                    if !self.project_drop_status.is_empty() {
+                        let alpha = ((self.project_drop_status_ttl as f32 / 60.0).min(1.0) * 255.0) as u8;
+                        ui.label(
+                            egui::RichText::new(&self.project_drop_status)
+                                .small()
+                                .color(egui::Color32::from_rgba_unmultiplied(100, 220, 100, alpha)),
+                        );
                     }
 
                     ui.separator();
@@ -1328,6 +1431,10 @@ impl EditorApp {
 
                             let mut clicked_idx: Option<usize> = None;
                             let mut double_clicked_idx: Option<usize> = None;
+                            let mut drop_move: Option<(usize, usize)> = None; // (src_idx, dest_folder_idx)
+
+                            // Track pointer position for drop detection
+                            let pointer_pos = ui.input(|i| i.pointer.hover_pos());
 
                             egui::Grid::new("resource_grid")
                                 .spacing([4.0, 4.0])
@@ -1337,7 +1444,7 @@ impl EditorApp {
 
                                         let (rect, response) = ui.allocate_exact_size(
                                             egui::vec2(tile, tile + 16.0),
-                                            egui::Sense::click(),
+                                            egui::Sense::click_and_drag(),
                                         );
 
                                         if response.clicked() {
@@ -1347,8 +1454,21 @@ impl EditorApp {
                                             double_clicked_idx = Some(i);
                                         }
 
+                                        // Drag tracking: start drag on non-folder entries
+                                        if response.drag_started() && entry.kind != FileKind::Folder {
+                                            self.project_dragging = Some(i);
+                                        }
+
+                                        // Drop detection: if we're dragging and pointer is over a folder
+                                        let is_drag_target = entry.kind == FileKind::Folder
+                                            && self.project_dragging.is_some()
+                                            && pointer_pos.map_or(false, |p| rect.contains(p));
+
                                         // Background
-                                        let bg = if is_selected {
+                                        let bg = if is_drag_target {
+                                            // Highlight folder as drop target
+                                            egui::Color32::from_rgba_unmultiplied(60, 180, 60, 80)
+                                        } else if is_selected {
                                             egui::Color32::from_rgba_unmultiplied(80, 120, 200, 60)
                                         } else if response.hovered() {
                                             egui::Color32::from_rgba_unmultiplied(80, 80, 80, 40)
@@ -1356,6 +1476,15 @@ impl EditorApp {
                                             egui::Color32::TRANSPARENT
                                         };
                                         ui.painter().rect_filled(rect, 4.0, bg);
+
+                                        // Draw drop target border
+                                        if is_drag_target {
+                                            ui.painter().rect_stroke(
+                                                rect.shrink(1.0),
+                                                4.0,
+                                                egui::Stroke::new(2.0, egui::Color32::from_rgb(80, 220, 80)),
+                                            );
+                                        }
 
                                         // Icon area
                                         let icon_rect = egui::Rect::from_min_size(
@@ -1428,14 +1557,26 @@ impl EditorApp {
                                             },
                                         );
 
-                                        // Tooltip
-                                        response.on_hover_ui(|ui| {
-                                            ui.strong(&entry.name);
-                                            ui.label(entry.path.display().to_string());
-                                            if entry.kind != FileKind::Folder {
-                                                ui.label(format_size(entry.size));
+                                        // Tooltip (suppress during drag)
+                                        if self.project_dragging.is_none() {
+                                            response.on_hover_ui(|ui| {
+                                                ui.strong(&entry.name);
+                                                ui.label(entry.path.display().to_string());
+                                                if entry.kind != FileKind::Folder {
+                                                    ui.label(format_size(entry.size));
+                                                }
+                                            });
+                                        }
+
+                                        // Detect drop onto folder: pointer released while over this folder
+                                        if is_drag_target {
+                                            let released = ui.input(|i| i.pointer.any_released());
+                                            if released {
+                                                if let Some(src) = self.project_dragging {
+                                                    drop_move = Some((src, i));
+                                                }
                                             }
-                                        });
+                                        }
 
                                         // End of row
                                         if (i + 1) % cols == 0 {
@@ -1443,6 +1584,44 @@ impl EditorApp {
                                         }
                                     }
                                 });
+
+                            // Draw drag cursor indicator
+                            if let Some(drag_idx) = self.project_dragging {
+                                if let Some(pos) = pointer_pos {
+                                    if let Some(drag_entry) = entries.get(drag_idx) {
+                                        ui.painter().text(
+                                            pos + egui::vec2(12.0, -8.0),
+                                            egui::Align2::LEFT_BOTTOM,
+                                            &drag_entry.name,
+                                            egui::FontId::proportional(11.0),
+                                            egui::Color32::from_rgba_unmultiplied(200, 200, 255, 200),
+                                        );
+                                    }
+                                }
+
+                                // Clear drag state when pointer released
+                                let released = ui.input(|i| i.pointer.any_released());
+                                if released {
+                                    self.project_dragging = None;
+                                }
+                            }
+
+                            // Process internal drag-and-drop move: file → folder
+                            if let Some((src_idx, dest_idx)) = drop_move {
+                                if let (Some(src_entry), Some(dest_entry)) = (entries.get(src_idx), entries.get(dest_idx)) {
+                                    if let Some(file_name) = src_entry.path.file_name() {
+                                        let dest_path = dest_entry.path.join(file_name);
+                                        if std::fs::rename(&src_entry.path, &dest_path).is_ok() {
+                                            self.project_entries = scan_directory(&self.project_dir);
+                                            self.project_folders = collect_folders(&std::path::PathBuf::from("resources"));
+                                            self.project_selected = None;
+                                            self.project_drop_status = format!("Moved \"{}\" to {}", src_entry.name, dest_entry.name);
+                                            self.project_drop_status_ttl = 180;
+                                        }
+                                    }
+                                }
+                                self.project_dragging = None;
+                            }
 
                             // Handle clicks
                             if let Some(idx) = clicked_idx {
