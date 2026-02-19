@@ -2124,7 +2124,10 @@ impl EditorApp {
                 });
             }
 
-            // Draw connections first
+            // Expand visible rect so partially-offscreen nodes/edges still render
+            let vis_rect = rect.expand(node_size.x.max(node_size.y));
+
+            // Draw connections first (cull if both endpoints offscreen)
             for raw in &ids {
                 let Some(def) = reg_snapshot.events.get(raw) else { continue };
                 let from_pos = *self.event_graph_pos.get(raw).unwrap();
@@ -2137,6 +2140,8 @@ impl EditorApp {
                         + egui::Vec2::new(node_size.x, 30.0 + choice_idx as f32 * 18.0);
                     let to = rect.min + (to_pos.to_vec2() + self.event_graph_pan)
                         + egui::Vec2::new(0.0, node_size.y * 0.5);
+                    // Skip edge if both endpoints are outside the visible area
+                    if !vis_rect.contains(from) && !vis_rect.contains(to) { continue; }
                     painter.line_segment(
                         [from, to],
                         egui::Stroke::new(2.0, ui.visuals().widgets.active.bg_fill),
@@ -2144,12 +2149,15 @@ impl EditorApp {
                 }
             }
 
-            // Draw nodes + interactions
+            // Draw nodes + interactions (cull if entirely offscreen)
             for raw in ids {
                 let Some(def) = reg_snapshot.events.get(&raw) else { continue };
                 let pos = *self.event_graph_pos.get(&raw).unwrap();
                 let top_left = rect.min + (pos.to_vec2() + self.event_graph_pan);
                 let node_rect = egui::Rect::from_min_size(top_left, node_size);
+
+                // Skip if node is entirely outside visible area
+                if !vis_rect.intersects(node_rect) { continue; }
 
                 let id = egui::Id::new(("event_node", raw));
                 let resp = ui.interact(node_rect, id, egui::Sense::click_and_drag());
@@ -2397,7 +2405,10 @@ impl EditorApp {
                 });
             }
 
-            // Draw edges: prereq -> node
+            // Expand visible rect slightly so edges/nodes partially offscreen still render
+            let vis_rect = rect.expand(node_size.x.max(node_size.y));
+
+            // Draw edges: prereq -> node (cull if both endpoints offscreen)
             for n in &tree.nodes {
                 let to_key = (tree_raw, n.id.raw());
                 let Some(to_pos) = self.progress_graph_pos.get(&to_key).copied() else { continue };
@@ -2406,17 +2417,22 @@ impl EditorApp {
                     let Some(from_pos) = self.progress_graph_pos.get(&from_key).copied() else { continue };
                     let from = rect.min + (from_pos.to_vec2() + self.progress_graph_pan) + egui::Vec2::new(node_size.x, node_size.y * 0.5);
                     let to = rect.min + (to_pos.to_vec2() + self.progress_graph_pan) + egui::Vec2::new(0.0, node_size.y * 0.5);
+                    // Skip edge if both endpoints are outside the visible area
+                    if !vis_rect.contains(from) && !vis_rect.contains(to) { continue; }
                     painter.line_segment([from, to], egui::Stroke::new(2.0, ui.visuals().widgets.active.bg_fill));
                 }
             }
 
-            // Nodes
+            // Nodes (cull if entirely offscreen)
             for n in &tree.nodes {
                 let raw = n.id.raw();
                 let key = (tree_raw, raw);
                 let pos = *self.progress_graph_pos.get(&key).unwrap();
                 let top_left = rect.min + (pos.to_vec2() + self.progress_graph_pan);
                 let node_rect = egui::Rect::from_min_size(top_left, node_size);
+
+                // Skip rendering if node is entirely outside visible area
+                if !vis_rect.intersects(node_rect) { continue; }
 
                 let id = egui::Id::new(("tree_node", tree_raw, raw));
                 let resp = ui.interact(node_rect, id, egui::Sense::click_and_drag());
@@ -2866,8 +2882,14 @@ impl EditorApp {
                                 let hex_h = cell_size * 2.0;
                                 let origin = rect.min + self.map_pan;
 
-                                for r in 0..h {
-                                    for q in 0..w {
+                                // Visible range culling: compute the range of hex rows/cols visible on screen
+                                let vis_q0 = ((rect.min.x - origin.x) / hex_w - 1.0).floor().max(0.0) as u32;
+                                let vis_q1 = (((rect.max.x - origin.x) / hex_w) + 2.0).ceil().max(0.0) as u32;
+                                let vis_r0 = ((rect.min.y - origin.y) / (hex_h * 0.5) - 1.0).floor().max(0.0) as u32;
+                                let vis_r1 = (((rect.max.y - origin.y) / (hex_h * 0.5)) + 2.0).ceil().max(0.0) as u32;
+
+                                for r in vis_r0..vis_r1.min(h) {
+                                    for q in vis_q0..vis_q1.min(w) {
                                         let raw = hex.get(q, r);
                                         let cx = origin.x + (q as f32 + 0.5 * (r % 2) as f32) * hex_w;
                                         let cy = origin.y + (r as f32 + 0.5) * hex_h * 0.5;
@@ -2912,8 +2934,8 @@ impl EditorApp {
                                 if show_names {
                                     let mut centroids: std::collections::HashMap<u32, (f32, f32, u32, u32)> =
                                         std::collections::HashMap::new();
-                                    for r in 0..h {
-                                        for q in 0..w {
+                                    for r in vis_r0..vis_r1.min(h) {
+                                        for q in vis_q0..vis_q1.min(w) {
                                             let raw = hex.get(q, r);
                                             if raw == 0 { continue; }
                                             let owner_raw = st
