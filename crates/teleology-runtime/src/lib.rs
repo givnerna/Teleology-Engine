@@ -13,7 +13,9 @@ use teleology_core::{
     GameDate, GameWorld, NationId, NationTags, ProvinceId, ProvinceStore, ProvinceTags,
     ProgressState, ProgressTrees, SimulationSchedule, TagId, TagRegistry, TagTypeId, WorldBuilder,
     WorldBounds, WorldSimulation,
-    UiCommand, UiCommandBuffer, UiPrefabRegistry,
+    UiCommand, UiCommandBuffer, UiPrefabRegistry, Viewport,
+    raycast, screen_to_world, world_to_screen, screen_to_tile_square, screen_to_tile_hex,
+    tile_distance_square, tile_distance_hex, RaycastHit, MapKind,
 };
 use teleology_script_api::{
     load_script_api, CArmyId, CGameDate, CGameTime, CNodeId, CNationId, CProvinceId, CTagId,
@@ -74,6 +76,11 @@ impl EngineContext {
             .build(&mut world);
         SimulationSchedule::build(&mut world);
         world.insert_resource(UiCommandBuffer::new());
+        world.insert_resource(Viewport {
+            base_cell: 14.0,
+            zoom: 1.0,
+            ..Viewport::default()
+        });
         Self {
             world: UnsafeCell::new(world),
             script_lib: None,
@@ -997,6 +1004,165 @@ pub extern "C" fn teleology_ui_prefab_count(engine: *mut TeleologyEngine) -> u32
     world.get_resource::<UiPrefabRegistry>()
         .map(|r| r.prefabs.len() as u32)
         .unwrap_or(0)
+}
+
+// --- Raycasting / coordinate conversion (screen ↔ world ↔ tile) ---
+
+/// C-friendly raycast result.
+#[repr(C)]
+pub struct CRaycastHit {
+    pub province_raw: u32,
+    pub tile_x: i32,
+    pub tile_y: i32,
+    pub world_x: f32,
+    pub world_y: f32,
+}
+
+impl Default for CRaycastHit {
+    fn default() -> Self {
+        Self { province_raw: 0, tile_x: -1, tile_y: -1, world_x: 0.0, world_y: 0.0 }
+    }
+}
+
+impl From<RaycastHit> for CRaycastHit {
+    fn from(h: RaycastHit) -> Self {
+        Self {
+            province_raw: h.province_raw,
+            tile_x: h.tile_x,
+            tile_y: h.tile_y,
+            world_x: h.world_x,
+            world_y: h.world_y,
+        }
+    }
+}
+
+/// Update the viewport state. Called by the host (editor) each frame.
+#[no_mangle]
+pub extern "C" fn teleology_viewport_set(
+    engine: *mut TeleologyEngine,
+    base_cell: f32,
+    zoom: f32,
+    pan_x: f32,
+    pan_y: f32,
+    canvas_x: f32,
+    canvas_y: f32,
+    canvas_w: f32,
+    canvas_h: f32,
+) {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return };
+    let world = unsafe { &mut *ctx.world.get() };
+    if let Some(mut vp) = world.get_resource_mut::<Viewport>() {
+        vp.base_cell = base_cell;
+        vp.zoom = zoom;
+        vp.pan_x = pan_x;
+        vp.pan_y = pan_y;
+        vp.canvas_x = canvas_x;
+        vp.canvas_y = canvas_y;
+        vp.canvas_w = canvas_w;
+        vp.canvas_h = canvas_h;
+    }
+}
+
+/// Perform a raycast: screen coordinates → province/tile/world.
+#[no_mangle]
+pub extern "C" fn teleology_raycast(
+    engine: *mut TeleologyEngine,
+    screen_x: f32,
+    screen_y: f32,
+) -> CRaycastHit {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return CRaycastHit::default() };
+    let world = unsafe { &*ctx.world.get() };
+    let Some(vp) = world.get_resource::<Viewport>() else { return CRaycastHit::default() };
+    let Some(mk) = world.get_resource::<MapKind>() else { return CRaycastHit::default() };
+    raycast(screen_x, screen_y, vp, mk).into()
+}
+
+/// Convert screen coordinates to world space. Writes to x_out, y_out.
+#[no_mangle]
+pub extern "C" fn teleology_screen_to_world(
+    engine: *mut TeleologyEngine,
+    screen_x: f32,
+    screen_y: f32,
+    x_out: *mut f32,
+    y_out: *mut f32,
+) {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return };
+    let world = unsafe { &*ctx.world.get() };
+    let Some(vp) = world.get_resource::<Viewport>() else { return };
+    let (wx, wy) = screen_to_world(screen_x, screen_y, vp);
+    if !x_out.is_null() { unsafe { *x_out = wx }; }
+    if !y_out.is_null() { unsafe { *y_out = wy }; }
+}
+
+/// Convert world coordinates to screen space. Writes to x_out, y_out.
+#[no_mangle]
+pub extern "C" fn teleology_world_to_screen(
+    engine: *mut TeleologyEngine,
+    world_x: f32,
+    world_y: f32,
+    x_out: *mut f32,
+    y_out: *mut f32,
+) {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return };
+    let world = unsafe { &*ctx.world.get() };
+    let Some(vp) = world.get_resource::<Viewport>() else { return };
+    let (sx, sy) = world_to_screen(world_x, world_y, vp);
+    if !x_out.is_null() { unsafe { *x_out = sx }; }
+    if !y_out.is_null() { unsafe { *y_out = sy }; }
+}
+
+/// Convert screen coordinates to tile coordinates. Returns 1 if valid, 0 if out of bounds.
+/// Writes tile_x, tile_y to out pointers.
+#[no_mangle]
+pub extern "C" fn teleology_screen_to_tile(
+    engine: *mut TeleologyEngine,
+    screen_x: f32,
+    screen_y: f32,
+    tile_x_out: *mut i32,
+    tile_y_out: *mut i32,
+) -> u8 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0 };
+    let world = unsafe { &*ctx.world.get() };
+    let Some(vp) = world.get_resource::<Viewport>() else { return 0 };
+    let Some(mk) = world.get_resource::<MapKind>() else { return 0 };
+    let result = match mk {
+        MapKind::Square(map) => screen_to_tile_square(screen_x, screen_y, vp, map.width, map.height)
+            .map(|(x, y)| (x as i32, y as i32)),
+        MapKind::Hex(map) => screen_to_tile_hex(screen_x, screen_y, vp, map.width, map.height)
+            .map(|(q, r)| (q as i32, r as i32)),
+        MapKind::Irregular(_) => {
+            let (wx, wy) = screen_to_world(screen_x, screen_y, vp);
+            Some((wx as i32, wy as i32))
+        }
+    };
+    match result {
+        Some((tx, ty)) => {
+            if !tile_x_out.is_null() { unsafe { *tile_x_out = tx }; }
+            if !tile_y_out.is_null() { unsafe { *tile_y_out = ty }; }
+            1
+        }
+        None => 0,
+    }
+}
+
+/// Compute tile distance between two tiles. Uses Chebyshev for square, axial for hex.
+/// For irregular maps returns 0 (no grid distance concept).
+#[no_mangle]
+pub extern "C" fn teleology_tile_distance(
+    engine: *mut TeleologyEngine,
+    x0: u32,
+    y0: u32,
+    x1: u32,
+    y1: u32,
+) -> u32 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0 };
+    let world = unsafe { &*ctx.world.get() };
+    let Some(mk) = world.get_resource::<MapKind>() else { return 0 };
+    match mk {
+        MapKind::Square(_) => tile_distance_square(x0, y0, x1, y1),
+        MapKind::Hex(_) => tile_distance_hex(x0, y0, x1, y1),
+        MapKind::Irregular(_) => 0,
+    }
 }
 
 #[cfg(test)]

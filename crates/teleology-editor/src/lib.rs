@@ -12,7 +12,7 @@ use teleology_core::{
     MapFile, MapKind, NationId, NationModifiers, NationStore, NationTags, ProgressState,
     ProgressTrees, ProvinceId, ProvinceModifiers, ProvinceStore, ProvinceTags, TagId, TagRegistry,
     TagTypeId, TickUnit, TimeConfig, Army, spawn_army, ActiveEvent, WorldBounds,
-    UiCommand, UiCommandBuffer, UiPrefabRegistry,
+    UiCommand, UiCommandBuffer, UiPrefabRegistry, Viewport,
 };
 use teleology_runtime::EngineContext;
 
@@ -777,6 +777,17 @@ impl eframe::App for EditorApp {
             EditorMode::Media => self.ui_media(ctx),
             EditorMode::World => self.ui_world(ctx),
             EditorMode::Settings => self.ui_settings(ctx),
+        }
+
+        // --- Feed viewport state to the Viewport resource for raycast ---
+        {
+            let world = self.engine.world_mut();
+            if let Some(mut vp) = world.get_resource_mut::<Viewport>() {
+                vp.base_cell = 14.0;
+                vp.zoom = self.map_zoom;
+                vp.pan_x = self.map_pan.x;
+                vp.pan_y = self.map_pan.y;
+            }
         }
 
         // --- Script game UI (immediate-mode command buffer) ---

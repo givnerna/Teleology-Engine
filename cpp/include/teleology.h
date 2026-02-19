@@ -188,6 +188,47 @@ uint8_t      teleology_ui_prefab_load(TeleologyEngine* engine, const char* path)
 uint8_t      teleology_ui_prefab_save_all(TeleologyEngine* engine, const char* path);
 uint8_t      teleology_ui_prefab_load_all(TeleologyEngine* engine, const char* path);
 
+/* --- Raycasting / coordinate conversion (screen <-> world <-> tile) ---
+ *
+ * The engine maintains a Viewport resource describing the current map view
+ * (zoom, pan, canvas rect). The editor feeds this each frame. Scripts can
+ * query it to convert screen coordinates to world/tile coordinates and
+ * perform hit-testing against provinces.
+ *
+ * Example:
+ *   float sx, sy;
+ *   if (teleology_input_last_click(engine, &sx, &sy)) {
+ *       CRaycastHit hit = teleology_raycast(engine, sx, sy);
+ *       if (hit.province_raw != 0) {
+ *           // clicked on province hit.province_raw at tile (hit.tile_x, hit.tile_y)
+ *       }
+ *   }
+ */
+
+typedef struct CRaycastHit {
+    uint32_t province_raw;  /* 0 = miss / no province */
+    int32_t  tile_x;        /* -1 if not applicable (irregular maps) */
+    int32_t  tile_y;
+    float    world_x;
+    float    world_y;
+} CRaycastHit;
+
+/* Update viewport state (called by host/editor each frame; scripts usually don't need this). */
+void         teleology_viewport_set(TeleologyEngine* engine, float base_cell, float zoom, float pan_x, float pan_y, float canvas_x, float canvas_y, float canvas_w, float canvas_h);
+
+/* Raycast: screen coords -> province/tile/world. Returns CRaycastHit. */
+CRaycastHit  teleology_raycast(TeleologyEngine* engine, float screen_x, float screen_y);
+
+/* Coordinate conversion */
+void         teleology_screen_to_world(TeleologyEngine* engine, float screen_x, float screen_y, float* x_out, float* y_out);
+void         teleology_world_to_screen(TeleologyEngine* engine, float world_x, float world_y, float* x_out, float* y_out);
+
+/* Screen -> tile. Returns 1 if valid tile, 0 if out of bounds. */
+uint8_t      teleology_screen_to_tile(TeleologyEngine* engine, float screen_x, float screen_y, int32_t* tile_x_out, int32_t* tile_y_out);
+
+/* Tile distance (Chebyshev for square grids, axial for hex; 0 for irregular). */
+uint32_t     teleology_tile_distance(TeleologyEngine* engine, uint32_t x0, uint32_t y0, uint32_t x1, uint32_t y1);
+
 #ifdef __cplusplus
 }
 #endif

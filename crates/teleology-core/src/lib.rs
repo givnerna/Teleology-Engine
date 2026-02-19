@@ -19,6 +19,7 @@ pub mod modifiers;
 pub mod events;
 pub mod event_bus;
 pub mod game_ui;
+pub mod raycast;
 pub mod population;
 pub mod progress_trees;
 pub mod armies;
@@ -53,6 +54,11 @@ pub use event_bus::{
     EventTopicId, scope_types,
 };
 pub use game_ui::{UiCommand, UiCommandBuffer, UiPrefab, UiPrefabRegistry};
+pub use raycast::{
+    point_in_polygon, point_to_province_irregular, raycast, screen_to_tile_hex,
+    screen_to_tile_square, screen_to_world, tile_distance_hex, tile_distance_square,
+    tile_to_world_hex, tile_to_world_square, world_to_screen, RaycastHit, Viewport,
+};
 pub use population::{PopGroup, PopulationConfig, ProvincePops};
 pub use progress_trees::{
     NationProgress, NodeId, ProgressNode, ProgressState, ProgressTreeDefinition, ProgressTrees,
