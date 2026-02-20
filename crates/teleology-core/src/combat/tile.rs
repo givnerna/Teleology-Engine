@@ -157,3 +157,53 @@ pub fn system_tile_reset_movement(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tile_combat_config_defaults() {
+        let config = TileCombatConfig::default();
+        assert!((config.base_strength_scale - 30.0).abs() < f64::EPSILON);
+        assert_eq!(config.hp_max, 100);
+        assert!(config.zone_of_control);
+        assert!(config.ranged_no_retaliation);
+        assert_eq!(config.movement_points_base, 2);
+    }
+
+    #[test]
+    fn unit_health_new() {
+        let h = UnitHealth::new(100, 2);
+        assert_eq!(h.hp, 100);
+        assert_eq!(h.max_hp, 100);
+        assert_eq!(h.xp, 0);
+        assert!(!h.fortified);
+        assert_eq!(h.movement_remaining, 2);
+    }
+
+    #[test]
+    fn unit_health_damage() {
+        let mut h = UnitHealth::new(100, 2);
+        h.hp = h.hp.saturating_sub(30);
+        assert_eq!(h.hp, 70);
+        h.hp = h.hp.saturating_sub(200);
+        assert_eq!(h.hp, 0);
+    }
+
+    #[test]
+    fn unit_health_fortification() {
+        let mut h = UnitHealth::new(100, 2);
+        assert!(!h.fortified);
+        h.fortified = true;
+        assert!(h.fortified);
+    }
+
+    #[test]
+    fn tile_combat_experience_levels() {
+        let config = TileCombatConfig::default();
+        assert_eq!(config.experience_levels.len(), 4);
+        assert!((config.experience_levels[0] - 0.0).abs() < f64::EPSILON);
+        assert!((config.experience_levels[3] - 0.30).abs() < f64::EPSILON);
+    }
+}

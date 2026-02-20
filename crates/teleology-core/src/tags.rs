@@ -13,7 +13,7 @@ use std::marker::PhantomData;
 use std::num::NonZeroU32;
 
 /// Stable id for a tag type/category (e.g. religion, culture, ideology, custom).
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TagTypeId(pub NonZeroU32);
 
 impl TagTypeId {
@@ -24,7 +24,7 @@ impl TagTypeId {
 }
 
 /// Stable id for a tag value (e.g. "Catholic", "English", "Democracy").
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TagId(pub NonZeroU32);
 
 impl TagId {
@@ -208,3 +208,103 @@ pub type NationTags = ScopedTags<NationId>;
 // Resource impls for the two concrete types.
 impl Resource for ScopedTags<ProvinceId> {}
 impl Resource for ScopedTags<NationId> {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::world::ScopeId;
+
+    #[test]
+    fn tag_registry_register_type() {
+        let mut reg = TagRegistry::new();
+        let religion = reg.register_type("religion");
+        let culture = reg.register_type("culture");
+        assert_ne!(religion, culture);
+        assert_eq!(reg.types.len(), 2);
+    }
+
+    #[test]
+    fn tag_registry_idempotent_type() {
+        let mut reg = TagRegistry::new();
+        let id1 = reg.register_type("religion");
+        let id2 = reg.register_type("religion");
+        assert_eq!(id1, id2);
+        assert_eq!(reg.types.len(), 1);
+    }
+
+    #[test]
+    fn tag_registry_register_tag() {
+        let mut reg = TagRegistry::new();
+        let religion = reg.register_type("religion");
+        let catholic = reg.register_tag(religion, "Catholic");
+        let orthodox = reg.register_tag(religion, "Orthodox");
+        assert_ne!(catholic, orthodox);
+        assert_eq!(reg.tags.len(), 2);
+    }
+
+    #[test]
+    fn tag_registry_idempotent_tag() {
+        let mut reg = TagRegistry::new();
+        let religion = reg.register_type("religion");
+        let id1 = reg.register_tag(religion, "Catholic");
+        let id2 = reg.register_tag(religion, "Catholic");
+        assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn tag_registry_get_type_name() {
+        let mut reg = TagRegistry::new();
+        let religion = reg.register_type("religion");
+        assert_eq!(reg.get_type_name(religion), Some("religion"));
+    }
+
+    #[test]
+    fn tag_registry_get_tag() {
+        let mut reg = TagRegistry::new();
+        let religion = reg.register_type("religion");
+        let catholic = reg.register_tag(religion, "Catholic");
+        let def = reg.get_tag(catholic).unwrap();
+        assert_eq!(def.name, "Catholic");
+        assert_eq!(def.type_id, religion);
+    }
+
+    #[test]
+    fn scoped_tags_set_get_clear() {
+        let mut tags = ScopedTags::<ProvinceId>::default();
+        let pid = ProvinceId::from_raw(1);
+        let ty = TagTypeId(NonZeroU32::new(1).unwrap());
+        let tag = TagId(NonZeroU32::new(10).unwrap());
+
+        assert!(tags.get(pid, ty).is_none());
+        tags.set(pid, ty, tag);
+        assert_eq!(tags.get(pid, ty), Some(tag));
+        tags.clear(pid, ty);
+        assert!(tags.get(pid, ty).is_none());
+    }
+
+    #[test]
+    fn scoped_tags_nation() {
+        let mut tags = ScopedTags::<NationId>::default();
+        let nid = NationId::from_raw(2);
+        let ty = TagTypeId(NonZeroU32::new(1).unwrap());
+        let tag = TagId(NonZeroU32::new(5).unwrap());
+
+        tags.set(nid, ty, tag);
+        assert_eq!(tags.get(nid, ty), Some(tag));
+    }
+
+    #[test]
+    fn scoped_tags_multiple_types() {
+        let mut tags = ScopedTags::<ProvinceId>::default();
+        let pid = ProvinceId::from_raw(1);
+        let religion = TagTypeId(NonZeroU32::new(1).unwrap());
+        let culture = TagTypeId(NonZeroU32::new(2).unwrap());
+        let catholic = TagId(NonZeroU32::new(10).unwrap());
+        let english = TagId(NonZeroU32::new(20).unwrap());
+
+        tags.set(pid, religion, catholic);
+        tags.set(pid, culture, english);
+        assert_eq!(tags.get(pid, religion), Some(catholic));
+        assert_eq!(tags.get(pid, culture), Some(english));
+    }
+}

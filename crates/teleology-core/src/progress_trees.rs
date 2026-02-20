@@ -21,7 +21,7 @@ impl TreeId {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct NodeId(pub NonZeroU32);
 
 impl NodeId {
@@ -281,5 +281,122 @@ impl ProgressState {
 
     pub fn add_progress_province(&mut self, province: ProvinceId, tree: TreeId, node: NodeId, amount: f64) {
         self.add_progress::<ProvinceId>(province, tree, node, amount);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::world::ScopeId;
+
+    #[test]
+    fn progress_trees_add_tree() {
+        let mut trees = ProgressTrees::new();
+        let tid = trees.add_tree("Technology");
+        assert_eq!(tid.raw(), 1);
+        assert_eq!(trees.trees.len(), 1);
+        assert_eq!(trees.trees[0].name, "Technology");
+    }
+
+    #[test]
+    fn progress_trees_add_node() {
+        let mut trees = ProgressTrees::new();
+        let tid = trees.add_tree("Tech");
+        let nid = trees.add_node(tid, "Agriculture", 100.0, vec![], vec![]);
+        assert_eq!(nid.raw(), 1);
+        assert_eq!(trees.trees[0].nodes.len(), 1);
+        assert_eq!(trees.trees[0].nodes[0].cost, 100.0);
+    }
+
+    #[test]
+    fn progress_trees_node_prerequisites() {
+        let mut trees = ProgressTrees::new();
+        let tid = trees.add_tree("Tech");
+        let n1 = trees.add_node(tid, "Farming", 50.0, vec![], vec![]);
+        let n2 = trees.add_node(tid, "Irrigation", 100.0, vec![n1], vec![]);
+        let node = trees.get_node(tid, n2).unwrap();
+        assert_eq!(node.prerequisites, vec![n1]);
+    }
+
+    #[test]
+    fn progress_trees_get_node() {
+        let mut trees = ProgressTrees::new();
+        let tid = trees.add_tree("Tech");
+        let nid = trees.add_node(tid, "Mining", 75.0, vec![], vec![1, 2, 3]);
+        let node = trees.get_node(tid, nid).unwrap();
+        assert_eq!(node.name, "Mining");
+        assert_eq!(node.effects_payload, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn scoped_progress_unlock() {
+        let mut sp = ScopedProgress::<NationId>::new(3);
+        let nid = NationId::from_raw(1);
+        let tid = TreeId(NonZeroU32::new(1).unwrap());
+        let node = NodeId(NonZeroU32::new(1).unwrap());
+
+        assert!(!sp.is_unlocked(nid, tid, node));
+        sp.unlock(nid, tid, node);
+        assert!(sp.is_unlocked(nid, tid, node));
+    }
+
+    #[test]
+    fn scoped_progress_add_progress() {
+        let mut sp = ScopedProgress::<NationId>::new(3);
+        let nid = NationId::from_raw(1);
+        let tid = TreeId(NonZeroU32::new(1).unwrap());
+        let node = NodeId(NonZeroU32::new(1).unwrap());
+
+        sp.add_progress(nid, tid, node, 50.0);
+        sp.add_progress(nid, tid, node, 30.0);
+
+        let state = &sp.per_scope[nid.index()][&tid.raw()];
+        let prog = state.progress[&node.raw()];
+        assert!((prog - 80.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn scoped_progress_unlock_clears_progress() {
+        let mut sp = ScopedProgress::<NationId>::new(3);
+        let nid = NationId::from_raw(1);
+        let tid = TreeId(NonZeroU32::new(1).unwrap());
+        let node = NodeId(NonZeroU32::new(1).unwrap());
+
+        sp.add_progress(nid, tid, node, 50.0);
+        sp.unlock(nid, tid, node);
+
+        let state = &sp.per_scope[nid.index()][&tid.raw()];
+        assert!(state.progress.get(&node.raw()).is_none());
+        assert!(state.unlocked.contains(&node.raw()));
+    }
+
+    #[test]
+    fn progress_state_nation_and_province() {
+        let mut ps = ProgressState::new(3, 5);
+        let nid = NationId::from_raw(1);
+        let pid = ProvinceId::from_raw(2);
+        let tid = TreeId(NonZeroU32::new(1).unwrap());
+        let node = NodeId(NonZeroU32::new(1).unwrap());
+
+        ps.unlock_nation(nid, tid, node);
+        assert!(ps.is_unlocked_nation(nid, tid, node));
+        assert!(!ps.is_unlocked_province(pid, tid, node));
+
+        ps.add_progress_province(pid, tid, node, 25.0);
+        assert!(!ps.is_unlocked_province(pid, tid, node));
+        ps.unlock_province(pid, tid, node);
+        assert!(ps.is_unlocked_province(pid, tid, node));
+    }
+
+    #[test]
+    fn progress_state_generic_api() {
+        let mut ps = ProgressState::new(3, 5);
+        let nid = NationId::from_raw(1);
+        let tid = TreeId(NonZeroU32::new(1).unwrap());
+        let node = NodeId(NonZeroU32::new(1).unwrap());
+
+        ps.add_progress::<NationId>(nid, tid, node, 10.0);
+        ps.unlock::<NationId>(nid, tid, node);
+        assert!(ps.is_unlocked::<NationId>(nid, tid, node));
     }
 }

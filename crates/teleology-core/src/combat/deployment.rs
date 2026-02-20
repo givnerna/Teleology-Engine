@@ -127,3 +127,63 @@ pub fn system_deployment_resolve_round(
             && b.round < config.max_rounds
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::world::ScopeId;
+
+    #[test]
+    fn deployment_config_defaults() {
+        let config = DeploymentConfig::default();
+        assert_eq!(config.deployment_radius, 2);
+        assert_eq!(config.max_rounds, 3);
+        assert_eq!(config.units_per_tile, 1);
+        assert_eq!(config.reinforcement_range, 3);
+        assert!(config.auto_resolve_available);
+        assert_eq!(config.retreat_after_rounds, 1);
+    }
+
+    #[test]
+    fn deployment_battle_initial_state() {
+        let battle = DeploymentBattle {
+            center: ProvinceId::from_raw(5),
+            round: 0,
+            attacker_units: vec![DeployedUnit {
+                army_id: ArmyId(std::num::NonZeroU32::new(1).unwrap()),
+                stack_index: 0,
+                hp: 100,
+                tile: ProvinceId::from_raw(5),
+            }],
+            defender_units: vec![DeployedUnit {
+                army_id: ArmyId(std::num::NonZeroU32::new(2).unwrap()),
+                stack_index: 0,
+                hp: 100,
+                tile: ProvinceId::from_raw(6),
+            }],
+            attacker_casualties: 0,
+            defender_casualties: 0,
+        };
+        assert_eq!(battle.round, 0);
+        assert_eq!(battle.attacker_units.len(), 1);
+        assert_eq!(battle.defender_units.len(), 1);
+    }
+
+    #[test]
+    fn active_deployment_battles_default() {
+        let battles = ActiveDeploymentBattles::default();
+        assert!(battles.battles.is_empty());
+    }
+
+    #[test]
+    fn deployed_unit_hp() {
+        let mut unit = DeployedUnit {
+            army_id: ArmyId(std::num::NonZeroU32::new(1).unwrap()),
+            stack_index: 0,
+            hp: 100,
+            tile: ProvinceId::from_raw(1),
+        };
+        unit.hp = unit.hp.saturating_sub(30);
+        assert_eq!(unit.hp, 70);
+    }
+}

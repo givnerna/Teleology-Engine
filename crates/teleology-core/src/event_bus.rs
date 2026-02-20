@@ -8,7 +8,7 @@ use std::collections::{HashMap, VecDeque};
 use std::num::NonZeroU32;
 
 /// Stable id for an event topic (string-backed).
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct EventTopicId(pub NonZeroU32);
 
 impl EventTopicId {
@@ -187,4 +187,130 @@ pub fn publish_event(
         },
         timestamp,
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy_ecs::world::World;
+
+    #[test]
+    fn entity_scope_ref_global() {
+        let s = EntityScopeRef::global();
+        assert!(s.is_global());
+        assert_eq!(s.scope_type, scope_types::GLOBAL);
+    }
+
+    #[test]
+    fn entity_scope_ref_nation() {
+        let s = EntityScopeRef::nation(5);
+        assert!(!s.is_global());
+        assert_eq!(s.scope_type, scope_types::NATION);
+        assert_eq!(s.raw, 5);
+    }
+
+    #[test]
+    fn entity_scope_ref_province() {
+        let s = EntityScopeRef::province(3);
+        assert_eq!(s.scope_type, scope_types::PROVINCE);
+    }
+
+    #[test]
+    fn entity_scope_ref_character() {
+        let raw: u64 = 0x1_0000_0002;
+        let s = EntityScopeRef::character(raw);
+        assert_eq!(s.scope_type, scope_types::CHARACTER);
+        assert_eq!(s.raw, 2);
+        assert_eq!(s.raw_hi, 1);
+    }
+
+    #[test]
+    fn entity_scope_ref_army() {
+        let s = EntityScopeRef::army(42);
+        assert_eq!(s.scope_type, scope_types::ARMY);
+        assert_eq!(s.raw, 42);
+    }
+
+    #[test]
+    fn entity_scope_ref_custom() {
+        let s = EntityScopeRef::custom(1001, 7);
+        assert_eq!(s.scope_type, 1001);
+        assert!(!s.is_global());
+    }
+
+    #[test]
+    fn event_bus_register_topic() {
+        let mut bus = EventBus::new();
+        let id1 = bus.get_or_register_topic("war.declared");
+        let id2 = bus.get_or_register_topic("war.declared");
+        assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn event_bus_multiple_topics() {
+        let mut bus = EventBus::new();
+        let id1 = bus.get_or_register_topic("war.declared");
+        let id2 = bus.get_or_register_topic("treaty.signed");
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn event_bus_topic_name() {
+        let mut bus = EventBus::new();
+        let id = bus.get_or_register_topic("test.topic");
+        assert_eq!(bus.topic_name(id), Some("test.topic"));
+    }
+
+    #[test]
+    fn event_bus_publish_poll() {
+        let mut bus = EventBus::new();
+        let topic = bus.get_or_register_topic("test");
+        bus.publish(EventEnvelope {
+            topic,
+            scope: EntityScopeRef::global(),
+            payload: EventPayload { payload_type_id: 1, bytes: vec![42] },
+            timestamp: 100,
+        });
+
+        let env = bus.poll().unwrap();
+        assert_eq!(env.topic, topic);
+        assert_eq!(env.payload.bytes, vec![42]);
+        assert_eq!(env.timestamp, 100);
+        assert!(bus.poll().is_none());
+    }
+
+    #[test]
+    fn event_bus_drain_all() {
+        let mut bus = EventBus::new();
+        let topic = bus.get_or_register_topic("test");
+        for i in 0..3 {
+            bus.publish(EventEnvelope {
+                topic,
+                scope: EntityScopeRef::global(),
+                payload: EventPayload { payload_type_id: 0, bytes: vec![i] },
+                timestamp: i as i64,
+            });
+        }
+        let all = bus.drain_all();
+        assert_eq!(all.len(), 3);
+        assert!(bus.queue.is_empty());
+    }
+
+    #[test]
+    fn publish_event_helper() {
+        let mut world = World::new();
+        world.insert_resource(EventBus::new());
+        publish_event(
+            &mut world,
+            "combat.result",
+            EntityScopeRef::province(5),
+            1,
+            vec![1, 2, 3],
+            500,
+        );
+        let mut bus = world.get_resource_mut::<EventBus>().unwrap();
+        let env = bus.poll().unwrap();
+        assert_eq!(env.scope.scope_type, scope_types::PROVINCE);
+        assert_eq!(env.scope.raw, 5);
+    }
 }
