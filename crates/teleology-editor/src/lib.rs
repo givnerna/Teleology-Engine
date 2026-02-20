@@ -7,11 +7,14 @@ use std::num::NonZeroU32;
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
 use teleology_core::{
-    add_province_to_world, compute_adjacency, pull_next_event, queue_event, ArmyComposition,
-    ArmyRegistry, CharacterGenConfig, EventBus, EventQueue, EventRegistry, GameDate, GameTime,
+    add_province_to_world, compute_adjacency, pull_next_event, queue_event,
+    register_builtin_templates, ArmyComposition,
+    ArmyRegistry, CharacterGenConfig, EventBus, EventPopupStyle, EventQueue, EventRegistry,
+    EventTemplate, GameDate, GameTime, KeywordRegistry, PopupAnchor,
     MapFile, MapKind, NationId, NationModifiers, NationStore, NationTags, ProgressState,
     ProgressTrees, ProvinceId, ProvinceModifiers, ProvinceStore, ProvinceTags, TagId, TagRegistry,
     TagTypeId, TickUnit, TimeConfig, Army, spawn_army, ActiveEvent, WorldBounds,
+    UiCommand, UiCommandBuffer, UiPrefabRegistry, Viewport,
 };
 use teleology_runtime::EngineContext;
 
@@ -216,6 +219,342 @@ fn panel_header(ui: &mut egui::Ui, title: &str) {
     ui.add_space(4.0);
 }
 
+/// Scan `resources/{subdir}` for files matching any of the given extensions.
+fn scan_resource_dir(subdir: &str, extensions: &[&str]) -> Vec<std::path::PathBuf> {
+    let dir = std::path::PathBuf::from("resources").join(subdir);
+    let Ok(entries) = std::fs::read_dir(&dir) else { return Vec::new() };
+    let mut files: Vec<std::path::PathBuf> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| extensions.iter().any(|e| e.eq_ignore_ascii_case(ext)))
+                .unwrap_or(false)
+        })
+        .collect();
+    files.sort();
+    files
+}
+
+/// File type category for resource browser icons.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FileKind {
+    Folder,
+    Image,
+    Audio,
+    Font,
+    Script,
+    Map,
+    Json,
+    Prefab,
+    Other,
+}
+
+impl FileKind {
+    fn from_path(path: &std::path::Path) -> Self {
+        if path.is_dir() {
+            return FileKind::Folder;
+        }
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        match ext.as_str() {
+            "png" | "jpg" | "jpeg" | "bmp" | "webp" | "gif" | "tga" => FileKind::Image,
+            "mp3" | "ogg" | "wav" | "flac" | "aac" => FileKind::Audio,
+            "ttf" | "otf" => FileKind::Font,
+            "cpp" | "c" | "h" | "hpp" | "rs" | "lua" | "py" => FileKind::Script,
+            "tmap" => FileKind::Map,
+            "json" => {
+                // Check if filename hints at prefab
+                let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                if stem.contains("prefab") {
+                    FileKind::Prefab
+                } else {
+                    FileKind::Json
+                }
+            }
+            _ => FileKind::Other,
+        }
+    }
+
+    fn icon(self) -> &'static str {
+        match self {
+            FileKind::Folder => "\u{1F4C1}",  // 📁
+            FileKind::Image => "\u{1F5BC}",    // 🖼
+            FileKind::Audio => "\u{1F3B5}",    // 🎵
+            FileKind::Font => "\u{1F524}",     // 🔤
+            FileKind::Script => "\u{1F4DC}",   // 📜
+            FileKind::Map => "\u{1F5FA}",      // 🗺
+            FileKind::Json => "\u{2699}",      // ⚙
+            FileKind::Prefab => "\u{1F9E9}",   // 🧩
+            FileKind::Other => "\u{1F4C4}",    // 📄
+        }
+    }
+
+    fn color(self) -> egui::Color32 {
+        match self {
+            FileKind::Folder => egui::Color32::from_rgb(220, 190, 100),
+            FileKind::Image => egui::Color32::from_rgb(120, 200, 120),
+            FileKind::Audio => egui::Color32::from_rgb(120, 160, 220),
+            FileKind::Font => egui::Color32::from_rgb(200, 140, 200),
+            FileKind::Script => egui::Color32::from_rgb(220, 180, 100),
+            FileKind::Map => egui::Color32::from_rgb(100, 200, 180),
+            FileKind::Json => egui::Color32::from_rgb(180, 180, 180),
+            FileKind::Prefab => egui::Color32::from_rgb(180, 120, 220),
+            FileKind::Other => egui::Color32::from_rgb(150, 150, 150),
+        }
+    }
+}
+
+/// One entry in the resource browser.
+#[derive(Clone)]
+struct ResourceEntry {
+    path: std::path::PathBuf,
+    name: String,
+    kind: FileKind,
+    size: u64,
+}
+
+/// Scan a directory for the resource browser (folders + all files).
+fn scan_directory(dir: &std::path::Path) -> Vec<ResourceEntry> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut result: Vec<ResourceEntry> = entries
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let path = e.path();
+            let name = path.file_name()?.to_string_lossy().to_string();
+            // Skip hidden files
+            if name.starts_with('.') {
+                return None;
+            }
+            let kind = FileKind::from_path(&path);
+            let size = e.metadata().map(|m| m.len()).unwrap_or(0);
+            Some(ResourceEntry { path, name, kind, size })
+        })
+        .collect();
+    // Folders first, then files, alphabetical within each group
+    result.sort_by(|a, b| {
+        let a_dir = a.kind == FileKind::Folder;
+        let b_dir = b.kind == FileKind::Folder;
+        b_dir.cmp(&a_dir).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    result
+}
+
+/// Recursively collect all directories under `root` (including `root` itself).
+fn collect_folders(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut result = vec![root.to_path_buf()];
+    if let Ok(entries) = std::fs::read_dir(root) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if path.is_dir() {
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if !name.starts_with('.') {
+                    result.extend(collect_folders(&path));
+                }
+            }
+        }
+    }
+    result.sort();
+    result
+}
+
+/// Default keyword highlight color (golden underline).
+const KEYWORD_DEFAULT_COLOR: egui::Color32 = egui::Color32::from_rgb(255, 200, 80);
+
+/// Render text with keyword highlighting and hover tooltips.
+/// Keywords found in `text` are rendered as colored, underlined spans.
+/// Hovering a keyword shows a tooltip panel with its title, description, and optional icon.
+fn render_keyword_text(
+    ui: &mut egui::Ui,
+    text: &str,
+    font: egui::FontId,
+    text_color: egui::Color32,
+    keywords: &teleology_core::KeywordRegistry,
+    thumbnails: &mut std::collections::HashMap<std::path::PathBuf, egui::TextureHandle>,
+    ctx: &egui::Context,
+) {
+    let matches = keywords.find_matches(text);
+    if matches.is_empty() {
+        // No keywords — plain label
+        ui.label(egui::RichText::new(text).font(font).color(text_color));
+        return;
+    }
+
+    // Render as a horizontal_wrapped layout with mixed spans
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        let mut cursor = 0usize;
+        for (start, end, entry_idx) in &matches {
+            // Plain text before this keyword
+            if *start > cursor {
+                let plain = &text[cursor..*start];
+                ui.label(egui::RichText::new(plain).font(font.clone()).color(text_color));
+            }
+            // Keyword span
+            let kw_text = &text[*start..*end];
+            let entry = &keywords.entries[*entry_idx];
+            let kw_color = if entry.color[3] > 0 {
+                egui::Color32::from_rgba_unmultiplied(
+                    entry.color[0], entry.color[1], entry.color[2], entry.color[3],
+                )
+            } else {
+                KEYWORD_DEFAULT_COLOR
+            };
+            let resp = ui.add(
+                egui::Label::new(
+                    egui::RichText::new(kw_text)
+                        .font(font.clone())
+                        .color(kw_color)
+                        .underline()
+                )
+                .sense(egui::Sense::hover()),
+            );
+            if resp.hovered() {
+                egui::show_tooltip_at_pointer(ctx, ui.layer_id(), egui::Id::new(("kw_tip", *entry_idx)), |ui| {
+                    ui.set_max_width(300.0);
+                    let frame = egui::Frame::default()
+                        .inner_margin(egui::Margin::same(8.0))
+                        .rounding(4.0)
+                        .fill(egui::Color32::from_rgba_unmultiplied(20, 20, 30, 240))
+                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_gray(80)));
+                    frame.show(ui, |ui| {
+                        // Icon + title row
+                        ui.horizontal(|ui| {
+                            if !entry.icon.is_empty() {
+                                let icon_path = std::path::Path::new(&entry.icon);
+                                if !thumbnails.contains_key(icon_path) {
+                                    if let Some(tex) = load_image_texture(ctx, icon_path) {
+                                        thumbnails.insert(icon_path.to_path_buf(), tex);
+                                    }
+                                }
+                                if let Some(tex) = thumbnails.get(icon_path) {
+                                    let size = egui::vec2(20.0, 20.0);
+                                    ui.image(egui::load::SizedTexture::new(tex.id(), size));
+                                }
+                            }
+                            ui.label(
+                                egui::RichText::new(&entry.title)
+                                    .strong()
+                                    .color(kw_color)
+                                    .font(egui::FontId::proportional(14.0)),
+                            );
+                        });
+                        ui.add_space(4.0);
+                        ui.separator();
+                        ui.add_space(4.0);
+                        ui.label(
+                            egui::RichText::new(&entry.description)
+                                .color(egui::Color32::from_gray(200))
+                                .font(egui::FontId::proportional(12.0)),
+                        );
+                    });
+                });
+            }
+            cursor = *end;
+        }
+        // Trailing plain text
+        if cursor < text.len() {
+            let tail = &text[cursor..];
+            ui.label(egui::RichText::new(tail).font(font).color(text_color));
+        }
+    });
+}
+
+/// Recursively copy a directory and its contents to a new location.
+fn copy_dir_recursive(src: &std::path::Path, dest: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dest)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let src_path = entry.path();
+        let dest_path = dest.join(entry.file_name());
+        if src_path.is_dir() {
+            copy_dir_recursive(&src_path, &dest_path)?;
+        } else {
+            std::fs::copy(&src_path, &dest_path)?;
+        }
+    }
+    Ok(())
+}
+
+/// Format file size for display.
+fn format_size(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{} B", bytes)
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
+
+/// Load an image file into an egui texture.
+fn load_image_texture(
+    ctx: &egui::Context,
+    path: &std::path::Path,
+) -> Option<egui::TextureHandle> {
+    let data = std::fs::read(path).ok()?;
+    let img = image::load_from_memory(&data).ok()?.to_rgba8();
+    let (w, h) = img.dimensions();
+    let pixels = img.into_raw();
+    let color_image = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &pixels);
+    Some(ctx.load_texture(
+        path.display().to_string(),
+        color_image,
+        egui::TextureOptions::LINEAR,
+    ))
+}
+
+/// Scan `resources/fonts/` and install every .ttf / .otf into egui.
+/// Returns `(font_file_paths, family_names_loaded)`.
+fn load_custom_fonts(ctx: &egui::Context) -> (Vec<std::path::PathBuf>, Vec<String>) {
+    let files = scan_resource_dir("fonts", &["ttf", "otf"]);
+    if files.is_empty() {
+        return (files, Vec::new());
+    }
+    let mut fonts = egui::FontDefinitions::default();
+    let mut families = Vec::new();
+    for path in &files {
+        let Ok(data) = std::fs::read(path) else { continue };
+        let stem = path
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        let family_name = stem.clone();
+        fonts.font_data.insert(
+            family_name.clone(),
+            egui::FontData::from_owned(data).into(),
+        );
+        // Register as its own FontFamily so it can be selected by name.
+        let family = egui::FontFamily::Name(family_name.clone().into());
+        fonts
+            .families
+            .entry(family.clone())
+            .or_default()
+            .insert(0, family_name.clone());
+        // Also prepend to Proportional so the font is usable everywhere.
+        fonts
+            .families
+            .entry(egui::FontFamily::Proportional)
+            .or_default()
+            .push(family_name.clone());
+        fonts
+            .families
+            .entry(egui::FontFamily::Monospace)
+            .or_default()
+            .push(family_name.clone());
+        families.push(family_name);
+    }
+    ctx.set_fonts(fonts);
+    (files, families)
+}
+
 pub struct EditorApp {
     pub engine: EngineContext,
     pub mode: EditorMode,
@@ -236,7 +575,6 @@ pub struct EditorApp {
     event_topic_input: String,
     event_payload_input: String,
     audio_path_input: String,
-    video_path_input: String,
 
     // --- Graph editor state (events / progress trees) ---
     event_graph_pan: egui::Vec2,
@@ -272,12 +610,57 @@ pub struct EditorApp {
     map_pan: egui::Vec2,
     /// Brush radius: 0 = single tile (1x1), 1 = 3x3, 2 = 5x5.
     brush_radius: u32,
+    /// Show province/nation name labels on the map.
+    show_map_names: bool,
+
+    // --- Media browser state ---
+    /// Cached list of audio files in resources/audio/.
+    audio_files: Vec<std::path::PathBuf>,
+    /// Cached list of image files in resources/assets/.
+    image_files: Vec<std::path::PathBuf>,
+    /// Selected audio file index.
+    media_selected_audio: Option<usize>,
+    /// Selected image file index.
+    media_selected_image: Option<usize>,
+    /// Cached image textures (path string → texture handle).
+    media_textures: std::collections::HashMap<std::path::PathBuf, egui::TextureHandle>,
+    /// Cached list of font files in resources/fonts/.
+    font_files: Vec<std::path::PathBuf>,
+    /// Selected font file index.
+    media_selected_font: Option<usize>,
+    /// Names of loaded custom font families (one per loaded file).
+    loaded_font_families: Vec<String>,
+    /// Preview text for font preview.
+    font_preview_text: String,
+
+    // --- Resource browser (Unity-style Project panel) ---
+    /// Currently browsed directory (relative to project root).
+    project_dir: std::path::PathBuf,
+    /// Cached entries in the current directory.
+    project_entries: Vec<ResourceEntry>,
+    /// Selected entry index.
+    project_selected: Option<usize>,
+    /// Grid tile size (px).
+    project_tile_size: f32,
+    /// Whether the resource browser has been scanned at least once.
+    project_scanned: bool,
+    /// Thumbnail cache: path → texture handle (for image files).
+    project_thumbnails: std::collections::HashMap<std::path::PathBuf, egui::TextureHandle>,
+    /// Folder tree: all directories under resources/ (cached on scan).
+    project_folders: Vec<std::path::PathBuf>,
+    /// Index of entry being dragged internally (file → folder move).
+    project_dragging: Option<usize>,
+    /// Status message for drag-and-drop operations (e.g. "Copied 3 files").
+    project_drop_status: String,
+    /// Tick counter for status message fade-out.
+    project_drop_status_ttl: u32,
 }
 
 impl EditorApp {
-    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let mut engine = EngineContext::new();
         engine.set_hot_reload(true);
+        let (font_files, loaded_font_families) = load_custom_fonts(&cc.egui_ctx);
         Self {
             engine,
             mode: EditorMode::default(),
@@ -296,7 +679,6 @@ impl EditorApp {
             event_topic_input: "demo_event".to_string(),
             event_payload_input: "hello".to_string(),
             audio_path_input: String::new(),
-            video_path_input: String::new(),
 
             event_graph_pan: egui::Vec2::new(20.0, 20.0),
             event_graph_pos: std::collections::HashMap::new(),
@@ -319,6 +701,27 @@ impl EditorApp {
             map_zoom: 1.0,
             map_pan: egui::Vec2::ZERO,
             brush_radius: 0,
+            show_map_names: false,
+            audio_files: scan_resource_dir("audio", &["mp3", "ogg", "wav", "flac", "aac"]),
+            image_files: scan_resource_dir("assets", &["png", "jpg", "jpeg", "bmp", "webp"]),
+            media_selected_audio: None,
+            media_selected_image: None,
+            media_textures: std::collections::HashMap::new(),
+            font_files,
+            media_selected_font: None,
+            loaded_font_families,
+            font_preview_text: "The quick brown fox jumps over the lazy dog.\n0123456789 !@#$%^&*()".to_string(),
+
+            project_dir: std::path::PathBuf::from("resources"),
+            project_entries: Vec::new(),
+            project_selected: None,
+            project_tile_size: 72.0,
+            project_scanned: false,
+            project_thumbnails: std::collections::HashMap::new(),
+            project_folders: Vec::new(),
+            project_dragging: None,
+            project_drop_status: String::new(),
+            project_drop_status_ttl: 0,
         }
     }
 }
@@ -364,6 +767,9 @@ impl eframe::App for EditorApp {
             }
             if ctx.input(|i| i.key_pressed(egui::Key::CloseBracket)) {
                 self.brush_radius = (self.brush_radius + 1).min(3);
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::N)) {
+                self.show_map_names = !self.show_map_names;
             }
         }
 
@@ -502,29 +908,22 @@ impl eframe::App for EditorApp {
             EditorMode::Settings => self.ui_settings(ctx),
         }
 
-        // --- Bottom panel: Project / Console (Unity-style) ---
-        egui::TopBottomPanel::bottom("project_console")
-            .frame(panel_frame())
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.style_mut().spacing.item_spacing.x = 8.0;
-                    ui.strong("Project");
-                ui.separator();
-                #[cfg(not(target_arch = "wasm32"))]
-                {
-                    ui.label("Script:");
-                    ui.add(egui::TextEdit::singleline(&mut self.script_path_input).desired_width(280.0));
-                    if ui.button("Load").clicked() {
-                        let path = PathBuf::from(self.script_path_input.trim());
-                        if path.exists() { let _ = self.engine.load_script(&path); }
-                    }
-                    ui.checkbox(&mut self.hot_reload, "Hot reload");
-                    self.engine.set_hot_reload(self.hot_reload);
-                }
-                #[cfg(target_arch = "wasm32")]
-                ui.label("WebGL │ script on desktop");
-            });
-        });
+        // --- Feed viewport state to the Viewport resource for raycast ---
+        {
+            let world = self.engine.world_mut();
+            if let Some(mut vp) = world.get_resource_mut::<Viewport>() {
+                vp.base_cell = 14.0;
+                vp.zoom = self.map_zoom;
+                vp.pan_x = self.map_pan.x;
+                vp.pan_y = self.map_pan.y;
+            }
+        }
+
+        // --- Script game UI (immediate-mode command buffer) ---
+        self.render_game_ui(ctx);
+
+        // --- Bottom panel: Resource Browser (Unity-style Project panel) ---
+        self.ui_project_browser(ctx);
     }
 }
 
@@ -655,95 +1054,1003 @@ impl EditorApp {
         true
     }
 
+    /// Render script-driven game UI from the UiCommandBuffer.
+    fn render_game_ui(&mut self, ctx: &egui::Context) {
+        let world = self.engine.world();
+        let (commands, prev_clicked) = {
+            let Some(buffer) = world.get_resource::<UiCommandBuffer>() else { return };
+            (buffer.commands.clone(), buffer.clicked_buttons.clone())
+        };
+
+        if commands.is_empty() {
+            return;
+        }
+
+        // State for walking the command stream
+        let mut clicked = Vec::new();
+        let mut pending_color: Option<egui::Color32> = None;
+        let mut pending_font_size: Option<f32> = None;
+
+        // We process commands in a flat walk. Windows use egui::Area + egui::Frame
+        // for positioning. Layout groups use closures captured in a stack approach,
+        // but since egui is immediate-mode we process sequentially.
+        let mut i = 0;
+        while i < commands.len() {
+            match &commands[i] {
+                UiCommand::BeginWindow { title, x, y, w, h } => {
+                    // Collect commands until matching EndWindow
+                    let start = i + 1;
+                    let mut depth = 1u32;
+                    let mut end = start;
+                    while end < commands.len() && depth > 0 {
+                        match &commands[end] {
+                            UiCommand::BeginWindow { .. } => depth += 1,
+                            UiCommand::EndWindow => depth -= 1,
+                            _ => {}
+                        }
+                        if depth > 0 {
+                            end += 1;
+                        }
+                    }
+                    let inner_cmds = &commands[start..end];
+                    let title = title.clone();
+                    let (wx, wy, ww, wh) = (*x, *y, *w, *h);
+
+                    egui::Window::new(&title)
+                        .id(egui::Id::new(format!("game_ui_{}", title)))
+                        .fixed_pos([wx, wy])
+                        .fixed_size([ww, wh])
+                        .title_bar(false)
+                        .collapsible(false)
+                        .resizable(false)
+                        .frame(egui::Frame::none()
+                            .fill(egui::Color32::from_black_alpha(180))
+                            .inner_margin(6.0)
+                            .rounding(4.0))
+                        .show(ctx, |ui| {
+                            Self::render_ui_commands(
+                                ui,
+                                inner_cmds,
+                                &prev_clicked,
+                                &mut clicked,
+                                &mut pending_color,
+                                &mut pending_font_size,
+                            );
+                        });
+
+                    i = if end < commands.len() { end + 1 } else { end };
+                }
+                UiCommand::EndWindow => {
+                    // Stray EndWindow outside a BeginWindow; skip
+                    i += 1;
+                }
+                _ => {
+                    // Top-level commands outside any window — skip (require a window)
+                    i += 1;
+                }
+            }
+        }
+
+        // Write back results
+        let world = self.engine.world_mut();
+        if let Some(mut buf) = world.get_resource_mut::<UiCommandBuffer>() {
+            buf.clicked_buttons = clicked;
+            buf.commands.clear();
+        }
+    }
+
+    /// Render a slice of UI commands into an egui Ui.
+    fn render_ui_commands(
+        ui: &mut egui::Ui,
+        commands: &[UiCommand],
+        prev_clicked: &[u32],
+        clicked: &mut Vec<u32>,
+        pending_color: &mut Option<egui::Color32>,
+        pending_font_size: &mut Option<f32>,
+    ) {
+        let mut i = 0;
+        while i < commands.len() {
+            match &commands[i] {
+                UiCommand::BeginHorizontal => {
+                    // Collect until EndHorizontal
+                    let start = i + 1;
+                    let mut depth = 1u32;
+                    let mut end = start;
+                    while end < commands.len() && depth > 0 {
+                        match &commands[end] {
+                            UiCommand::BeginHorizontal => depth += 1,
+                            UiCommand::EndHorizontal => depth -= 1,
+                            _ => {}
+                        }
+                        if depth > 0 { end += 1; }
+                    }
+                    let inner = &commands[start..end];
+                    ui.horizontal(|ui| {
+                        Self::render_ui_commands(ui, inner, prev_clicked, clicked, pending_color, pending_font_size);
+                    });
+                    i = if end < commands.len() { end + 1 } else { end };
+                }
+                UiCommand::EndHorizontal => { i += 1; }
+
+                UiCommand::BeginVertical => {
+                    let start = i + 1;
+                    let mut depth = 1u32;
+                    let mut end = start;
+                    while end < commands.len() && depth > 0 {
+                        match &commands[end] {
+                            UiCommand::BeginVertical => depth += 1,
+                            UiCommand::EndVertical => depth -= 1,
+                            _ => {}
+                        }
+                        if depth > 0 { end += 1; }
+                    }
+                    let inner = &commands[start..end];
+                    ui.vertical(|ui| {
+                        Self::render_ui_commands(ui, inner, prev_clicked, clicked, pending_color, pending_font_size);
+                    });
+                    i = if end < commands.len() { end + 1 } else { end };
+                }
+                UiCommand::EndVertical => { i += 1; }
+
+                UiCommand::Label { text, font_size } => {
+                    let size = if *font_size > 0.0 {
+                        *font_size
+                    } else {
+                        pending_font_size.take().unwrap_or(14.0)
+                    };
+                    let mut rt = egui::RichText::new(text).size(size);
+                    if let Some(color) = pending_color.take() {
+                        rt = rt.color(color);
+                    }
+                    ui.label(rt);
+                    i += 1;
+                }
+
+                UiCommand::Button { id, text } => {
+                    let mut rt = egui::RichText::new(text);
+                    if let Some(color) = pending_color.take() {
+                        rt = rt.color(color);
+                    }
+                    if let Some(size) = pending_font_size.take() {
+                        rt = rt.size(size);
+                    }
+                    if ui.button(rt).clicked() {
+                        clicked.push(*id);
+                    }
+                    i += 1;
+                }
+
+                UiCommand::ProgressBar { fraction, text, w } => {
+                    pending_color.take();
+                    pending_font_size.take();
+                    let bar = egui::ProgressBar::new(*fraction)
+                        .text(text.as_str())
+                        .desired_width(*w);
+                    ui.add(bar);
+                    i += 1;
+                }
+
+                UiCommand::Image { path: _path, w, h } => {
+                    pending_color.take();
+                    pending_font_size.take();
+                    // Placeholder: show a colored rect where the image would go
+                    let (rect, _) = ui.allocate_exact_size(
+                        egui::vec2(*w, *h),
+                        egui::Sense::hover(),
+                    );
+                    ui.painter().rect_filled(rect, 0.0, egui::Color32::from_gray(60));
+                    ui.painter().text(
+                        rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "[img]",
+                        egui::FontId::proportional(10.0),
+                        egui::Color32::from_gray(140),
+                    );
+                    i += 1;
+                }
+
+                UiCommand::Separator => {
+                    pending_color.take();
+                    pending_font_size.take();
+                    ui.separator();
+                    i += 1;
+                }
+
+                UiCommand::Spacing { amount } => {
+                    pending_color.take();
+                    pending_font_size.take();
+                    ui.add_space(*amount);
+                    i += 1;
+                }
+
+                UiCommand::SetColor { r, g, b, a } => {
+                    *pending_color = Some(egui::Color32::from_rgba_unmultiplied(*r, *g, *b, *a));
+                    i += 1;
+                }
+
+                UiCommand::SetFontSize { size } => {
+                    *pending_font_size = Some(*size);
+                    i += 1;
+                }
+
+                // Nested windows inside a window are skipped (not supported)
+                UiCommand::BeginWindow { .. } => {
+                    let mut depth = 1u32;
+                    i += 1;
+                    while i < commands.len() && depth > 0 {
+                        match &commands[i] {
+                            UiCommand::BeginWindow { .. } => depth += 1,
+                            UiCommand::EndWindow => depth -= 1,
+                            _ => {}
+                        }
+                        i += 1;
+                    }
+                }
+                UiCommand::EndWindow => { i += 1; }
+            }
+        }
+    }
+
+    /// Unity-style resource browser: folder tree on left, file grid on right.
+    fn ui_project_browser(&mut self, ctx: &egui::Context) {
+        // Initial scan
+        if !self.project_scanned {
+            self.project_entries = scan_directory(&self.project_dir);
+            self.project_folders = collect_folders(&std::path::PathBuf::from("resources"));
+            self.project_scanned = true;
+        }
+
+        // --- OS file drag-and-drop: copy dropped files into current project directory ---
+        let dropped: Vec<egui::DroppedFile> = ctx.input(|i| i.raw.dropped_files.clone());
+        if !dropped.is_empty() {
+            let mut copied = 0u32;
+            for file in &dropped {
+                if let Some(src_path) = &file.path {
+                    if let Some(file_name) = src_path.file_name() {
+                        let dest = self.project_dir.join(file_name);
+                        if src_path.is_dir() {
+                            // Recursively copy directory
+                            if copy_dir_recursive(src_path, &dest).is_ok() {
+                                copied += 1;
+                            }
+                        } else if std::fs::copy(src_path, &dest).is_ok() {
+                            copied += 1;
+                        }
+                    }
+                } else if let Some(bytes) = &file.bytes {
+                    // Dropped from browser or clipboard — has bytes but no path
+                    let name = if file.name.is_empty() { "dropped_file" } else { &file.name };
+                    let dest = self.project_dir.join(name);
+                    if std::fs::write(&dest, bytes.as_ref()).is_ok() {
+                        copied += 1;
+                    }
+                }
+            }
+            if copied > 0 {
+                self.project_entries = scan_directory(&self.project_dir);
+                self.project_folders = collect_folders(&std::path::PathBuf::from("resources"));
+                self.project_selected = None;
+                self.project_drop_status = format!("Copied {} file{}", copied, if copied == 1 { "" } else { "s" });
+                self.project_drop_status_ttl = 180; // ~3 seconds at 60fps
+            }
+        }
+
+        // Tick down status message
+        if self.project_drop_status_ttl > 0 {
+            self.project_drop_status_ttl -= 1;
+            if self.project_drop_status_ttl == 0 {
+                self.project_drop_status.clear();
+            }
+        }
+
+        // Check if OS files are hovering over the window (for visual feedback)
+        let os_hovering = ctx.input(|i| !i.raw.hovered_files.is_empty());
+
+        egui::TopBottomPanel::bottom("project_browser")
+            .default_height(200.0)
+            .resizable(true)
+            .frame(panel_frame())
+            .show(ctx, |ui| {
+                // --- Drop overlay: visual feedback when dragging files from OS ---
+                if os_hovering {
+                    let panel_rect = ui.max_rect();
+                    ui.painter().rect_filled(
+                        panel_rect,
+                        4.0,
+                        egui::Color32::from_rgba_unmultiplied(60, 120, 220, 40),
+                    );
+                    ui.painter().rect_stroke(
+                        panel_rect.shrink(2.0),
+                        4.0,
+                        egui::Stroke::new(2.0, egui::Color32::from_rgb(100, 160, 255)),
+                    );
+                    ui.painter().text(
+                        panel_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "Drop files here to import",
+                        egui::FontId::proportional(18.0),
+                        egui::Color32::from_rgb(180, 210, 255),
+                    );
+                }
+
+                // --- Top bar: breadcrumb + controls ---
+                ui.horizontal(|ui| {
+                    ui.style_mut().spacing.item_spacing.x = 4.0;
+
+                    // Breadcrumb navigation
+                    let parts: Vec<String> = self.project_dir
+                        .components()
+                        .map(|c| c.as_os_str().to_string_lossy().to_string())
+                        .collect();
+                    for (i, part) in parts.iter().enumerate() {
+                        if i > 0 {
+                            ui.label(
+                                egui::RichText::new("/")
+                                    .small()
+                                    .color(ui.visuals().weak_text_color()),
+                            );
+                        }
+                        let is_last = i == parts.len() - 1;
+                        if is_last {
+                            ui.strong(part);
+                        } else if ui.small_button(part).clicked() {
+                            let new_dir: std::path::PathBuf = parts[..=i].iter().collect();
+                            self.project_dir = new_dir;
+                            self.project_entries = scan_directory(&self.project_dir);
+                            self.project_selected = None;
+                        }
+                    }
+
+                    ui.separator();
+
+                    // Up button
+                    if ui.small_button("\u{2B06} Up").on_hover_text("Go to parent folder").clicked() {
+                        if let Some(parent) = self.project_dir.parent() {
+                            // Don't go above project root
+                            if parent.components().count() > 0 {
+                                self.project_dir = parent.to_path_buf();
+                                self.project_entries = scan_directory(&self.project_dir);
+                                self.project_selected = None;
+                            }
+                        }
+                    }
+
+                    if ui.small_button("\u{21BB} Refresh").on_hover_text("Re-scan directory").clicked() {
+                        self.project_entries = scan_directory(&self.project_dir);
+                        self.project_folders = collect_folders(&std::path::PathBuf::from("resources"));
+                        self.project_selected = None;
+                    }
+
+                    // Drop status message (fades after a few seconds)
+                    if !self.project_drop_status.is_empty() {
+                        let alpha = ((self.project_drop_status_ttl as f32 / 60.0).min(1.0) * 255.0) as u8;
+                        ui.label(
+                            egui::RichText::new(&self.project_drop_status)
+                                .small()
+                                .color(egui::Color32::from_rgba_unmultiplied(100, 220, 100, alpha)),
+                        );
+                    }
+
+                    ui.separator();
+
+                    // Tile size slider
+                    ui.label(
+                        egui::RichText::new("Size:")
+                            .small()
+                            .color(ui.visuals().weak_text_color()),
+                    );
+                    ui.add(egui::Slider::new(&mut self.project_tile_size, 48.0..=128.0).show_value(false));
+
+                    ui.separator();
+
+                    // Script loader (moved from old bottom panel)
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        ui.label(
+                            egui::RichText::new("Script:")
+                                .small()
+                                .color(ui.visuals().weak_text_color()),
+                        );
+                        ui.add(egui::TextEdit::singleline(&mut self.script_path_input).desired_width(200.0));
+                        if ui.small_button("Load").clicked() {
+                            let path = PathBuf::from(self.script_path_input.trim());
+                            if path.exists() {
+                                let _ = self.engine.load_script(&path);
+                            }
+                        }
+                        ui.checkbox(&mut self.hot_reload, "Hot reload");
+                        self.engine.set_hot_reload(self.hot_reload);
+                    }
+                    #[cfg(target_arch = "wasm32")]
+                    ui.label("WebGL");
+                });
+
+                ui.add_space(2.0);
+                ui.separator();
+
+                // --- Body: folder tree (left) + file grid (right) ---
+                ui.horizontal_top(|ui| {
+                    // Folder tree (left panel, fixed width)
+                    let tree_width = 160.0;
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(tree_width, ui.available_height()),
+                        egui::Layout::top_down(egui::Align::LEFT),
+                        |ui| {
+                            egui::ScrollArea::vertical()
+                                .id_salt("project_tree")
+                                .show(ui, |ui| {
+                                    for folder in &self.project_folders.clone() {
+                                        let depth = folder
+                                            .strip_prefix("resources")
+                                            .map(|r| r.components().count())
+                                            .unwrap_or(0);
+                                        let indent = depth as f32 * 14.0;
+                                        let display_name = folder
+                                            .file_name()
+                                            .unwrap_or(folder.as_os_str())
+                                            .to_string_lossy()
+                                            .to_string();
+                                        let is_selected = *folder == self.project_dir;
+
+                                        ui.horizontal(|ui| {
+                                            ui.add_space(indent);
+                                            let label = if is_selected {
+                                                egui::RichText::new(format!("\u{1F4C2} {}", display_name))
+                                                    .strong()
+                                                    .color(egui::Color32::from_rgb(220, 190, 100))
+                                            } else {
+                                                egui::RichText::new(format!("\u{1F4C1} {}", display_name))
+                                                    .color(egui::Color32::from_rgb(200, 180, 120))
+                                            };
+                                            if ui.selectable_label(is_selected, label).clicked() {
+                                                self.project_dir = folder.clone();
+                                                self.project_entries = scan_directory(&self.project_dir);
+                                                self.project_selected = None;
+                                            }
+                                        });
+                                    }
+                                });
+                        },
+                    );
+
+                    ui.separator();
+
+                    // File grid (right, fills remaining space)
+                    egui::ScrollArea::both()
+                        .id_salt("project_grid")
+                        .show(ui, |ui| {
+                            if self.project_entries.is_empty() {
+                                ui.label(
+                                    egui::RichText::new("Empty folder")
+                                        .italics()
+                                        .color(ui.visuals().weak_text_color()),
+                                );
+                                return;
+                            }
+
+                            let tile = self.project_tile_size;
+                            let available_width = ui.available_width();
+                            let cols = ((available_width / (tile + 8.0)).floor() as usize).max(1);
+                            let entries = self.project_entries.clone();
+
+                            let mut clicked_idx: Option<usize> = None;
+                            let mut double_clicked_idx: Option<usize> = None;
+                            let mut drop_move: Option<(usize, usize)> = None; // (src_idx, dest_folder_idx)
+
+                            // Track pointer position for drop detection
+                            let pointer_pos = ui.input(|i| i.pointer.hover_pos());
+
+                            egui::Grid::new("resource_grid")
+                                .spacing([4.0, 4.0])
+                                .show(ui, |ui| {
+                                    for (i, entry) in entries.iter().enumerate() {
+                                        let is_selected = self.project_selected == Some(i);
+
+                                        let (rect, response) = ui.allocate_exact_size(
+                                            egui::vec2(tile, tile + 16.0),
+                                            egui::Sense::click_and_drag(),
+                                        );
+
+                                        if response.clicked() {
+                                            clicked_idx = Some(i);
+                                        }
+                                        if response.double_clicked() {
+                                            double_clicked_idx = Some(i);
+                                        }
+
+                                        // Drag tracking: start drag on non-folder entries
+                                        if response.drag_started() && entry.kind != FileKind::Folder {
+                                            self.project_dragging = Some(i);
+                                        }
+
+                                        // Drop detection: if we're dragging and pointer is over a folder
+                                        let is_drag_target = entry.kind == FileKind::Folder
+                                            && self.project_dragging.is_some()
+                                            && pointer_pos.map_or(false, |p| rect.contains(p));
+
+                                        // Background
+                                        let bg = if is_drag_target {
+                                            // Highlight folder as drop target
+                                            egui::Color32::from_rgba_unmultiplied(60, 180, 60, 80)
+                                        } else if is_selected {
+                                            egui::Color32::from_rgba_unmultiplied(80, 120, 200, 60)
+                                        } else if response.hovered() {
+                                            egui::Color32::from_rgba_unmultiplied(80, 80, 80, 40)
+                                        } else {
+                                            egui::Color32::TRANSPARENT
+                                        };
+                                        ui.painter().rect_filled(rect, 4.0, bg);
+
+                                        // Draw drop target border
+                                        if is_drag_target {
+                                            ui.painter().rect_stroke(
+                                                rect.shrink(1.0),
+                                                4.0,
+                                                egui::Stroke::new(2.0, egui::Color32::from_rgb(80, 220, 80)),
+                                            );
+                                        }
+
+                                        // Icon area
+                                        let icon_rect = egui::Rect::from_min_size(
+                                            rect.min,
+                                            egui::vec2(tile, tile - 4.0),
+                                        );
+
+                                        // Image thumbnail for image files
+                                        let mut drew_thumb = false;
+                                        if entry.kind == FileKind::Image {
+                                            if !self.project_thumbnails.contains_key(&entry.path) {
+                                                if let Some(tex) = load_image_texture(ctx, &entry.path) {
+                                                    self.project_thumbnails.insert(entry.path.clone(), tex);
+                                                }
+                                            }
+                                            if let Some(tex) = self.project_thumbnails.get(&entry.path) {
+                                                let img_size = tex.size_vec2();
+                                                let scale = ((tile - 8.0) / img_size.x)
+                                                    .min((tile - 12.0) / img_size.y);
+                                                let display = img_size * scale;
+                                                let img_rect = egui::Rect::from_center_size(
+                                                    icon_rect.center(),
+                                                    display,
+                                                );
+                                                ui.painter().image(
+                                                    tex.id(),
+                                                    img_rect,
+                                                    egui::Rect::from_min_max(
+                                                        egui::pos2(0.0, 0.0),
+                                                        egui::pos2(1.0, 1.0),
+                                                    ),
+                                                    egui::Color32::WHITE,
+                                                );
+                                                drew_thumb = true;
+                                            }
+                                        }
+
+                                        if !drew_thumb {
+                                            // Draw file type icon
+                                            let icon_text = entry.kind.icon();
+                                            let icon_size = (tile * 0.45).clamp(16.0, 48.0);
+                                            ui.painter().text(
+                                                icon_rect.center(),
+                                                egui::Align2::CENTER_CENTER,
+                                                icon_text,
+                                                egui::FontId::proportional(icon_size),
+                                                entry.kind.color(),
+                                            );
+                                        }
+
+                                        // File name below icon
+                                        let name_rect = egui::Rect::from_min_max(
+                                            egui::pos2(rect.min.x, rect.max.y - 14.0),
+                                            rect.max,
+                                        );
+                                        let truncated = if entry.name.len() > 12 {
+                                            format!("{}…", &entry.name[..11])
+                                        } else {
+                                            entry.name.clone()
+                                        };
+                                        ui.painter().text(
+                                            name_rect.center(),
+                                            egui::Align2::CENTER_CENTER,
+                                            &truncated,
+                                            egui::FontId::proportional(10.0),
+                                            if is_selected {
+                                                egui::Color32::WHITE
+                                            } else {
+                                                egui::Color32::from_gray(200)
+                                            },
+                                        );
+
+                                        // Tooltip (suppress during drag)
+                                        if self.project_dragging.is_none() {
+                                            response.on_hover_ui(|ui| {
+                                                ui.strong(&entry.name);
+                                                ui.label(entry.path.display().to_string());
+                                                if entry.kind != FileKind::Folder {
+                                                    ui.label(format_size(entry.size));
+                                                }
+                                            });
+                                        }
+
+                                        // Detect drop onto folder: pointer released while over this folder
+                                        if is_drag_target {
+                                            let released = ui.input(|i| i.pointer.any_released());
+                                            if released {
+                                                if let Some(src) = self.project_dragging {
+                                                    drop_move = Some((src, i));
+                                                }
+                                            }
+                                        }
+
+                                        // End of row
+                                        if (i + 1) % cols == 0 {
+                                            ui.end_row();
+                                        }
+                                    }
+                                });
+
+                            // Draw drag cursor indicator
+                            if let Some(drag_idx) = self.project_dragging {
+                                if let Some(pos) = pointer_pos {
+                                    if let Some(drag_entry) = entries.get(drag_idx) {
+                                        ui.painter().text(
+                                            pos + egui::vec2(12.0, -8.0),
+                                            egui::Align2::LEFT_BOTTOM,
+                                            &drag_entry.name,
+                                            egui::FontId::proportional(11.0),
+                                            egui::Color32::from_rgba_unmultiplied(200, 200, 255, 200),
+                                        );
+                                    }
+                                }
+
+                                // Clear drag state when pointer released
+                                let released = ui.input(|i| i.pointer.any_released());
+                                if released {
+                                    self.project_dragging = None;
+                                }
+                            }
+
+                            // Process internal drag-and-drop move: file → folder
+                            if let Some((src_idx, dest_idx)) = drop_move {
+                                if let (Some(src_entry), Some(dest_entry)) = (entries.get(src_idx), entries.get(dest_idx)) {
+                                    if let Some(file_name) = src_entry.path.file_name() {
+                                        let dest_path = dest_entry.path.join(file_name);
+                                        if std::fs::rename(&src_entry.path, &dest_path).is_ok() {
+                                            self.project_entries = scan_directory(&self.project_dir);
+                                            self.project_folders = collect_folders(&std::path::PathBuf::from("resources"));
+                                            self.project_selected = None;
+                                            self.project_drop_status = format!("Moved \"{}\" to {}", src_entry.name, dest_entry.name);
+                                            self.project_drop_status_ttl = 180;
+                                        }
+                                    }
+                                }
+                                self.project_dragging = None;
+                            }
+
+                            // Handle clicks
+                            if let Some(idx) = clicked_idx {
+                                self.project_selected = Some(idx);
+                            }
+                            if let Some(idx) = double_clicked_idx {
+                                let entry = &entries[idx];
+                                if entry.kind == FileKind::Folder {
+                                    self.project_dir = entry.path.clone();
+                                    self.project_entries = scan_directory(&self.project_dir);
+                                    self.project_selected = None;
+                                } else if entry.kind == FileKind::Script {
+                                    // Double-click script → load it
+                                    #[cfg(not(target_arch = "wasm32"))]
+                                    {
+                                        // If it looks like a compiled library, load as script
+                                        let ext = entry.path.extension()
+                                            .and_then(|e| e.to_str())
+                                            .unwrap_or("");
+                                        if ext == "so" || ext == "dll" || ext == "dylib" {
+                                            let _ = self.engine.load_script(&entry.path);
+                                        } else {
+                                            self.script_path_input = entry.path.display().to_string();
+                                        }
+                                    }
+                                } else if entry.kind == FileKind::Audio {
+                                    // Double-click audio → play it
+                                    let _ = self.engine.audio_play_file(&entry.path, false, 0.8);
+                                }
+                            }
+                        });
+                });
+            });
+    }
+
     fn ui_media(&mut self, ctx: &egui::Context) {
+        // --- Left panel: file browser for audio + images ---
+        egui::SidePanel::left("media_browser")
+            .default_width(280.0)
+            .resizable(true)
+            .frame(panel_frame())
+            .show(ctx, |ui| {
+                panel_header(ui, "Browser");
+                ui.add_space(4.0);
+
+                if ui.button("Refresh").on_hover_text("Re-scan resources/ folders (audio, assets, fonts)").clicked() {
+                    self.audio_files = scan_resource_dir("audio", &["mp3", "ogg", "wav", "flac", "aac"]);
+                    self.image_files = scan_resource_dir("assets", &["png", "jpg", "jpeg", "bmp", "webp"]);
+                    let (ff, fam) = load_custom_fonts(ctx);
+                    self.font_files = ff;
+                    self.loaded_font_families = fam;
+                    self.media_selected_font = None;
+                }
+                ui.add_space(6.0);
+
+                // ---- Audio files ----
+                ui.strong("Audio");
+                ui.label(
+                    egui::RichText::new("resources/audio/")
+                        .small()
+                        .color(ui.visuals().weak_text_color()),
+                );
+                ui.add_space(4.0);
+                if self.audio_files.is_empty() {
+                    ui.label(
+                        egui::RichText::new("No audio files. Place .mp3/.ogg/.wav/.flac files in resources/audio/")
+                            .small()
+                            .color(ui.visuals().weak_text_color()),
+                    );
+                } else {
+                    egui::ScrollArea::vertical()
+                        .id_salt("audio_list")
+                        .max_height(200.0)
+                        .show(ui, |ui| {
+                            for (i, path) in self.audio_files.iter().enumerate() {
+                                let name = path.file_name().unwrap_or_default().to_string_lossy();
+                                let selected = self.media_selected_audio == Some(i);
+                                if ui.selectable_label(selected, name.as_ref()).clicked() {
+                                    self.media_selected_audio = Some(i);
+                                    self.audio_path_input = path.display().to_string();
+                                }
+                            }
+                        });
+                }
+
+                ui.add_space(10.0);
+                ui.separator();
+                ui.add_space(10.0);
+
+                // ---- Image files ----
+                ui.strong("Images");
+                ui.label(
+                    egui::RichText::new("resources/assets/")
+                        .small()
+                        .color(ui.visuals().weak_text_color()),
+                );
+                ui.add_space(4.0);
+                if self.image_files.is_empty() {
+                    ui.label(
+                        egui::RichText::new("No image files. Place .png/.jpg/.bmp/.webp files in resources/assets/")
+                            .small()
+                            .color(ui.visuals().weak_text_color()),
+                    );
+                } else {
+                    egui::ScrollArea::vertical()
+                        .id_salt("image_list")
+                        .max_height(200.0)
+                        .show(ui, |ui| {
+                            for (i, path) in self.image_files.iter().enumerate() {
+                                let name = path.file_name().unwrap_or_default().to_string_lossy();
+                                let selected = self.media_selected_image == Some(i);
+                                if ui.selectable_label(selected, name.as_ref()).clicked() {
+                                    self.media_selected_image = Some(i);
+                                }
+                            }
+                        });
+                }
+
+                ui.add_space(10.0);
+                ui.separator();
+                ui.add_space(10.0);
+
+                // ---- Font files ----
+                ui.strong("Fonts");
+                ui.label(
+                    egui::RichText::new("resources/fonts/")
+                        .small()
+                        .color(ui.visuals().weak_text_color()),
+                );
+                ui.add_space(4.0);
+                if self.font_files.is_empty() {
+                    ui.label(
+                        egui::RichText::new("No font files. Place .ttf/.otf files in resources/fonts/")
+                            .small()
+                            .color(ui.visuals().weak_text_color()),
+                    );
+                } else {
+                    egui::ScrollArea::vertical()
+                        .id_salt("font_list")
+                        .auto_shrink([false; 2])
+                        .show(ui, |ui| {
+                            for (i, path) in self.font_files.iter().enumerate() {
+                                let name = path.file_name().unwrap_or_default().to_string_lossy();
+                                let selected = self.media_selected_font == Some(i);
+                                if ui.selectable_label(selected, name.as_ref()).clicked() {
+                                    self.media_selected_font = Some(i);
+                                }
+                            }
+                        });
+                }
+            });
+
+        // --- Center panel: preview / controls ---
         egui::CentralPanel::default()
             .frame(panel_frame())
             .show(ctx, |ui| {
-                panel_header(ui, "Media");
-                ui.heading("Media");
-            ui.add_space(8.0);
+                panel_header(ui, "Preview");
+                ui.add_space(8.0);
 
-            ui.group(|ui| {
-                ui.strong("Audio (native)");
-                ui.label(
-                    egui::RichText::new("Basic playback via kira. Works on desktop; no-op on wasm.")
-                        .small()
-                        .color(ui.visuals().weak_text_color()),
-                );
-                ui.add_space(6.0);
+                // ---- Audio controls ----
+                ui.group(|ui| {
+                    ui.strong("Audio");
+                    ui.add_space(4.0);
 
-                ui.horizontal(|ui| {
-                    ui.label("File:");
-                    ui.text_edit_singleline(&mut self.audio_path_input);
-                    #[cfg(not(target_arch = "wasm32"))]
-                    if ui.button("Pick").clicked() {
-                        if let Some(path) = rfd::FileDialog::new().pick_file() {
-                            self.audio_path_input = path.display().to_string();
-                        }
-                    }
-                });
-
-                ui.horizontal(|ui| {
-                    if ui.button("Play once").clicked() {
-                        let p = std::path::PathBuf::from(self.audio_path_input.trim());
-                        let _ = self.engine.audio_play_file(&p, false, 0.8);
-                    }
-                    if ui.button("Loop").clicked() {
-                        let p = std::path::PathBuf::from(self.audio_path_input.trim());
-                        let _ = self.engine.audio_play_file(&p, true, 0.6);
-                    }
-                    if ui.button("Volume 100%").clicked() {
-                        self.engine.audio_set_master_volume(1.0);
-                    }
-                    if ui.button("Volume 50%").clicked() {
-                        self.engine.audio_set_master_volume(0.5);
-                    }
-                });
-            });
-
-            ui.add_space(12.0);
-            ui.separator();
-            ui.add_space(12.0);
-
-            ui.group(|ui| {
-                ui.strong("Video (cutscene player)");
-                ui.label(
-                    egui::RichText::new("MP4/H.264 decoding is feature-gated behind `teleology-runtime` feature `video_ffmpeg`.")
-                        .small()
-                        .color(ui.visuals().weak_text_color()),
-                );
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    ui.label("File:");
-                    ui.text_edit_singleline(&mut self.video_path_input);
-                    #[cfg(not(target_arch = "wasm32"))]
-                    if ui.button("Pick").clicked() {
-                        if let Some(path) = rfd::FileDialog::new()
-                            .add_filter("Video", &["mp4", "m4v", "mov"])
-                            .pick_file()
-                        {
-                            self.video_path_input = path.display().to_string();
-                        }
-                    }
-                });
-                ui.horizontal(|ui| {
-                    if ui.button("Open").clicked() {
-                        let p = std::path::PathBuf::from(self.video_path_input.trim());
-                        let ok = self.engine.video_open(&p);
-                        if !ok {
+                    if let Some(idx) = self.media_selected_audio {
+                        if let Some(path) = self.audio_files.get(idx) {
+                            let name = path.file_name().unwrap_or_default().to_string_lossy();
+                            ui.label(format!("Selected: {}", name));
                             ui.label(
-                                egui::RichText::new("Open failed (likely missing `video_ffmpeg` feature or FFmpeg).")
-                                    .color(ui.visuals().error_fg_color),
+                                egui::RichText::new(path.display().to_string())
+                                    .small()
+                                    .color(ui.visuals().weak_text_color()),
                             );
+                            ui.add_space(4.0);
+                            ui.horizontal(|ui| {
+                                if ui.button("Play").clicked() {
+                                    let _ = self.engine.audio_play_file(path, false, 0.8);
+                                }
+                                if ui.button("Loop").clicked() {
+                                    let _ = self.engine.audio_play_file(path, true, 0.6);
+                                }
+                                ui.separator();
+                                if ui.button("Vol 100%").clicked() {
+                                    self.engine.audio_set_master_volume(1.0);
+                                }
+                                if ui.button("Vol 50%").clicked() {
+                                    self.engine.audio_set_master_volume(0.5);
+                                }
+                            });
                         }
+                    } else {
+                        ui.label(
+                            egui::RichText::new("Select an audio file from the browser.")
+                                .small()
+                                .color(ui.visuals().weak_text_color()),
+                        );
                     }
-                    if ui.button("Poll frame").clicked() {
-                        let _ = self.engine.video_poll_frame();
+
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.label("Custom path:");
+                        ui.text_edit_singleline(&mut self.audio_path_input);
+                        #[cfg(not(target_arch = "wasm32"))]
+                        if ui.small_button("Pick").clicked() {
+                            if let Some(path) = rfd::FileDialog::new().pick_file() {
+                                self.audio_path_input = path.display().to_string();
+                            }
+                        }
+                        if ui.small_button("Play").clicked() {
+                            let p = std::path::PathBuf::from(self.audio_path_input.trim());
+                            let _ = self.engine.audio_play_file(&p, false, 0.8);
+                        }
+                    });
+                });
+
+                ui.add_space(12.0);
+                ui.separator();
+                ui.add_space(12.0);
+
+                // ---- Image preview ----
+                ui.group(|ui| {
+                    ui.strong("Image Preview");
+                    ui.add_space(4.0);
+
+                    if let Some(idx) = self.media_selected_image {
+                        if let Some(path) = self.image_files.get(idx).cloned() {
+                            let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                            ui.label(format!("Selected: {}", name));
+                            ui.label(
+                                egui::RichText::new(path.display().to_string())
+                                    .small()
+                                    .color(ui.visuals().weak_text_color()),
+                            );
+                            ui.add_space(6.0);
+
+                            // Load texture on demand, cache it
+                            if !self.media_textures.contains_key(&path) {
+                                if let Some(tex) = load_image_texture(ctx, &path) {
+                                    self.media_textures.insert(path.clone(), tex);
+                                }
+                            }
+                            if let Some(tex) = self.media_textures.get(&path) {
+                                let img_size = tex.size_vec2();
+                                let available = ui.available_size();
+                                let scale = (available.x / img_size.x)
+                                    .min(available.y / img_size.y)
+                                    .min(1.0);
+                                let display_size = img_size * scale;
+                                ui.image(egui::load::SizedTexture::new(tex.id(), display_size));
+                                ui.add_space(4.0);
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "{}x{} px",
+                                        img_size.x as u32,
+                                        img_size.y as u32
+                                    ))
+                                    .small()
+                                    .color(ui.visuals().weak_text_color()),
+                                );
+                            } else {
+                                ui.label(
+                                    egui::RichText::new("Failed to load image.")
+                                        .color(ui.visuals().error_fg_color),
+                                );
+                            }
+                        }
+                    } else {
+                        ui.label(
+                            egui::RichText::new("Select an image file from the browser.")
+                                .small()
+                                .color(ui.visuals().weak_text_color()),
+                        );
                     }
                 });
-                ui.label("Frame rendering to texture will appear once decoding is implemented (FFmpeg path is currently a stub).");
+
+                ui.add_space(12.0);
+                ui.separator();
+                ui.add_space(12.0);
+
+                // ---- Font preview ----
+                ui.group(|ui| {
+                    ui.strong("Font Preview");
+                    ui.add_space(4.0);
+
+                    if let Some(idx) = self.media_selected_font {
+                        if let Some(path) = self.font_files.get(idx) {
+                            let file_name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                            let family_name = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+                            ui.label(format!("Selected: {}", file_name));
+                            ui.label(
+                                egui::RichText::new(format!("Family: \"{}\"", family_name))
+                                    .small()
+                                    .color(ui.visuals().weak_text_color()),
+                            );
+                            ui.add_space(6.0);
+
+                            ui.label("Preview text:");
+                            ui.text_edit_multiline(&mut self.font_preview_text);
+                            ui.add_space(6.0);
+
+                            let family = egui::FontFamily::Name(family_name.into());
+                            for &size in &[14.0_f32, 20.0, 28.0, 40.0] {
+                                ui.label(
+                                    egui::RichText::new(&self.font_preview_text)
+                                        .font(egui::FontId::new(size, family.clone()))
+                                        .color(egui::Color32::WHITE),
+                                );
+                                ui.add_space(4.0);
+                            }
+                        }
+                    } else if self.loaded_font_families.is_empty() {
+                        ui.label(
+                            egui::RichText::new("No fonts loaded. Place .ttf/.otf files in resources/fonts/ and click Refresh.")
+                                .small()
+                                .color(ui.visuals().weak_text_color()),
+                        );
+                    } else {
+                        ui.label(
+                            egui::RichText::new("Select a font from the browser.")
+                                .small()
+                                .color(ui.visuals().weak_text_color()),
+                        );
+                    }
+                });
             });
-        });
     }
 
     fn ui_events_editor(&mut self, ctx: &egui::Context) {
@@ -787,11 +2094,59 @@ impl EditorApp {
                                 next_event: None,
                                 effects_payload: Vec::new(),
                             }],
+                            image: String::new(),
+                            image_w: 0.0,
+                            image_h: 0.0,
                         });
                         self.event_selected_raw = Some(id.raw());
                     }
                     self.pending_create_event = false;
                 }
+
+                // --- Template gallery ---
+                ui.add_space(4.0);
+                ui.collapsing("Templates", |ui| {
+                    ui.label(
+                        egui::RichText::new("Create from template (customize after):")
+                            .small()
+                            .color(ui.visuals().weak_text_color()),
+                    );
+                    ui.add_space(2.0);
+                    let templates: &[(&str, EventTemplate)] = &[
+                        ("Notification", EventTemplate::Notification),
+                        ("Binary Choice", EventTemplate::BinaryChoice),
+                        ("Three-Way", EventTemplate::ThreeWayChoice),
+                        ("Narrative", EventTemplate::Narrative),
+                        ("Diplomatic", EventTemplate::DiplomaticProposal),
+                    ];
+                    for (label, tmpl) in templates {
+                        if ui.button(*label).clicked() {
+                            if world.get_resource::<EventRegistry>().is_none() {
+                                world.insert_resource(EventRegistry::new());
+                                world.insert_resource(EventQueue::default());
+                                world.insert_resource(ActiveEvent::default());
+                                world.insert_resource(EventPopupStyle::default());
+                            }
+                            if let Some(mut reg) = world.get_resource_mut::<EventRegistry>() {
+                                let id = reg.insert(tmpl.create());
+                                self.event_selected_raw = Some(id.raw());
+                            }
+                        }
+                    }
+                    ui.add_space(2.0);
+                    if ui.button("Register all templates").on_hover_text("Create all 5 templates at once").clicked() {
+                        if world.get_resource::<EventRegistry>().is_none() {
+                            world.insert_resource(EventRegistry::new());
+                            world.insert_resource(EventQueue::default());
+                            world.insert_resource(ActiveEvent::default());
+                            world.insert_resource(EventPopupStyle::default());
+                        }
+                        if let Some(mut reg) = world.get_resource_mut::<EventRegistry>() {
+                            let ids = register_builtin_templates(&mut reg);
+                            self.event_selected_raw = Some(ids[0].raw());
+                        }
+                    }
+                });
 
                 // List events.
                 let ids: Vec<u32> = world
@@ -921,7 +2276,10 @@ impl EditorApp {
                 });
             }
 
-            // Draw connections first
+            // Expand visible rect so partially-offscreen nodes/edges still render
+            let vis_rect = rect.expand(node_size.x.max(node_size.y));
+
+            // Draw connections first (cull if both endpoints offscreen)
             for raw in &ids {
                 let Some(def) = reg_snapshot.events.get(raw) else { continue };
                 let from_pos = *self.event_graph_pos.get(raw).unwrap();
@@ -934,6 +2292,8 @@ impl EditorApp {
                         + egui::Vec2::new(node_size.x, 30.0 + choice_idx as f32 * 18.0);
                     let to = rect.min + (to_pos.to_vec2() + self.event_graph_pan)
                         + egui::Vec2::new(0.0, node_size.y * 0.5);
+                    // Skip edge if both endpoints are outside the visible area
+                    if !vis_rect.contains(from) && !vis_rect.contains(to) { continue; }
                     painter.line_segment(
                         [from, to],
                         egui::Stroke::new(2.0, ui.visuals().widgets.active.bg_fill),
@@ -941,12 +2301,15 @@ impl EditorApp {
                 }
             }
 
-            // Draw nodes + interactions
+            // Draw nodes + interactions (cull if entirely offscreen)
             for raw in ids {
                 let Some(def) = reg_snapshot.events.get(&raw) else { continue };
                 let pos = *self.event_graph_pos.get(&raw).unwrap();
                 let top_left = rect.min + (pos.to_vec2() + self.event_graph_pan);
                 let node_rect = egui::Rect::from_min_size(top_left, node_size);
+
+                // Skip if node is entirely outside visible area
+                if !vis_rect.intersects(node_rect) { continue; }
 
                 let id = egui::Id::new(("event_node", raw));
                 let resp = ui.interact(node_rect, id, egui::Sense::click_and_drag());
@@ -1194,7 +2557,10 @@ impl EditorApp {
                 });
             }
 
-            // Draw edges: prereq -> node
+            // Expand visible rect slightly so edges/nodes partially offscreen still render
+            let vis_rect = rect.expand(node_size.x.max(node_size.y));
+
+            // Draw edges: prereq -> node (cull if both endpoints offscreen)
             for n in &tree.nodes {
                 let to_key = (tree_raw, n.id.raw());
                 let Some(to_pos) = self.progress_graph_pos.get(&to_key).copied() else { continue };
@@ -1203,17 +2569,22 @@ impl EditorApp {
                     let Some(from_pos) = self.progress_graph_pos.get(&from_key).copied() else { continue };
                     let from = rect.min + (from_pos.to_vec2() + self.progress_graph_pan) + egui::Vec2::new(node_size.x, node_size.y * 0.5);
                     let to = rect.min + (to_pos.to_vec2() + self.progress_graph_pan) + egui::Vec2::new(0.0, node_size.y * 0.5);
+                    // Skip edge if both endpoints are outside the visible area
+                    if !vis_rect.contains(from) && !vis_rect.contains(to) { continue; }
                     painter.line_segment([from, to], egui::Stroke::new(2.0, ui.visuals().widgets.active.bg_fill));
                 }
             }
 
-            // Nodes
+            // Nodes (cull if entirely offscreen)
             for n in &tree.nodes {
                 let raw = n.id.raw();
                 let key = (tree_raw, raw);
                 let pos = *self.progress_graph_pos.get(&key).unwrap();
                 let top_left = rect.min + (pos.to_vec2() + self.progress_graph_pan);
                 let node_rect = egui::Rect::from_min_size(top_left, node_size);
+
+                // Skip rendering if node is entirely outside visible area
+                if !vis_rect.intersects(node_rect) { continue; }
 
                 let id = egui::Id::new(("tree_node", tree_raw, raw));
                 let resp = ui.interact(node_rect, id, egui::Sense::click_and_drag());
@@ -1293,6 +2664,7 @@ impl EditorApp {
 
     fn ui_map_editor(&mut self, ctx: &egui::Context) {
         let paint_ownership = self.map_paint_mode == MapEditorPaintMode::PaintOwnership;
+        let show_names = self.show_map_names;
         let is_irregular = self
             .engine
             .world()
@@ -1367,6 +2739,9 @@ impl EditorApp {
                         self.map_zoom = 1.0;
                         self.map_pan = egui::Vec2::ZERO;
                     }
+                    ui.separator();
+                    ui.checkbox(&mut self.show_map_names, "Names")
+                        .on_hover_text("Show province/nation labels on the map (N)");
                 });
                 ui.add_space(2.0);
 
@@ -1517,6 +2892,46 @@ impl EditorApp {
                                         }
                                     }
                                 }
+                                // --- Province / nation name labels ---
+                                if show_names {
+                                    let mut centroids: std::collections::HashMap<u32, (f32, f32, u32, u32)> =
+                                        std::collections::HashMap::new();
+                                    for y in vis_y0..vis_y1.min(map.height) {
+                                        for x in vis_x0..vis_x1.min(map.width) {
+                                            let raw = map.get(x, y);
+                                            if raw == 0 { continue; }
+                                            let owner_raw = st
+                                                .get(ProvinceId(NonZeroU32::new(raw).unwrap()))
+                                                .and_then(|p| p.owner)
+                                                .map(|n| n.0.get())
+                                                .unwrap_or(0);
+                                            let e = centroids.entry(raw).or_insert((0.0, 0.0, 0, owner_raw));
+                                            e.0 += origin.x + (x as f32 + 0.5) * cell_size;
+                                            e.1 += origin.y + (y as f32 + 0.5) * cell_size;
+                                            e.2 += 1;
+                                        }
+                                    }
+                                    let font_size = (cell_size * 0.75).clamp(7.0, 18.0);
+                                    let font_id = egui::FontId::proportional(font_size);
+                                    for (prov_raw, (sum_x, sum_y, count, owner_raw)) in &centroids {
+                                        let cx = sum_x / *count as f32;
+                                        let cy = sum_y / *count as f32;
+                                        let label = if paint_ownership && *owner_raw != 0 {
+                                            format!("N{}", owner_raw)
+                                        } else {
+                                            format!("P{}", prov_raw)
+                                        };
+                                        let pos = egui::Pos2::new(cx, cy);
+                                        let galley = painter.layout_no_wrap(label, font_id.clone(), egui::Color32::WHITE);
+                                        let text_rect = egui::Rect::from_center_size(pos, galley.size());
+                                        painter.rect_filled(
+                                            text_rect.expand(2.0),
+                                            2.0,
+                                            egui::Color32::from_rgba_premultiplied(0, 0, 0, 160),
+                                        );
+                                        painter.galley(text_rect.min, galley, egui::Color32::WHITE);
+                                    }
+                                }
                                 // --- Cursor → tile mapping (zoom/pan aware) ---
                                 let to_tile = |pos: egui::Pos2| -> Option<(u32, u32)> {
                                     let lx = (pos.x - origin.x) / cell_size;
@@ -1619,8 +3034,14 @@ impl EditorApp {
                                 let hex_h = cell_size * 2.0;
                                 let origin = rect.min + self.map_pan;
 
-                                for r in 0..h {
-                                    for q in 0..w {
+                                // Visible range culling: compute the range of hex rows/cols visible on screen
+                                let vis_q0 = ((rect.min.x - origin.x) / hex_w - 1.0).floor().max(0.0) as u32;
+                                let vis_q1 = (((rect.max.x - origin.x) / hex_w) + 2.0).ceil().max(0.0) as u32;
+                                let vis_r0 = ((rect.min.y - origin.y) / (hex_h * 0.5) - 1.0).floor().max(0.0) as u32;
+                                let vis_r1 = (((rect.max.y - origin.y) / (hex_h * 0.5)) + 2.0).ceil().max(0.0) as u32;
+
+                                for r in vis_r0..vis_r1.min(h) {
+                                    for q in vis_q0..vis_q1.min(w) {
                                         let raw = hex.get(q, r);
                                         let cx = origin.x + (q as f32 + 0.5 * (r % 2) as f32) * hex_w;
                                         let cy = origin.y + (r as f32 + 0.5) * hex_h * 0.5;
@@ -1659,6 +3080,48 @@ impl EditorApp {
                                             province_border_stroke()
                                         };
                                         painter.add(egui::Shape::convex_polygon(points, base_color, stroke));
+                                    }
+                                }
+                                // --- Province / nation name labels (hex) ---
+                                if show_names {
+                                    let mut centroids: std::collections::HashMap<u32, (f32, f32, u32, u32)> =
+                                        std::collections::HashMap::new();
+                                    for r in vis_r0..vis_r1.min(h) {
+                                        for q in vis_q0..vis_q1.min(w) {
+                                            let raw = hex.get(q, r);
+                                            if raw == 0 { continue; }
+                                            let owner_raw = st
+                                                .get(ProvinceId(NonZeroU32::new(raw).unwrap()))
+                                                .and_then(|p| p.owner)
+                                                .map(|n| n.0.get())
+                                                .unwrap_or(0);
+                                            let hx = origin.x + (q as f32 + 0.5 * (r % 2) as f32) * hex_w;
+                                            let hy = origin.y + (r as f32 + 0.5) * hex_h * 0.5;
+                                            let e = centroids.entry(raw).or_insert((0.0, 0.0, 0, owner_raw));
+                                            e.0 += hx;
+                                            e.1 += hy;
+                                            e.2 += 1;
+                                        }
+                                    }
+                                    let font_size = (cell_size * 0.75).clamp(7.0, 18.0);
+                                    let font_id = egui::FontId::proportional(font_size);
+                                    for (prov_raw, (sum_x, sum_y, count, owner_raw)) in &centroids {
+                                        let cx = sum_x / *count as f32;
+                                        let cy = sum_y / *count as f32;
+                                        let label = if paint_ownership && *owner_raw != 0 {
+                                            format!("N{}", owner_raw)
+                                        } else {
+                                            format!("P{}", prov_raw)
+                                        };
+                                        let pos = egui::Pos2::new(cx, cy);
+                                        let galley = painter.layout_no_wrap(label, font_id.clone(), egui::Color32::WHITE);
+                                        let text_rect = egui::Rect::from_center_size(pos, galley.size());
+                                        painter.rect_filled(
+                                            text_rect.expand(2.0),
+                                            2.0,
+                                            egui::Color32::from_rgba_premultiplied(0, 0, 0, 160),
+                                        );
+                                        painter.galley(text_rect.min, galley, egui::Color32::WHITE);
                                     }
                                 }
                                 // --- Cursor → hex mapping ---
@@ -1908,24 +3371,139 @@ impl EditorApp {
                     let def = inst
                         .as_ref()
                         .and_then(|i| world.get_resource::<EventRegistry>().and_then(|r| r.get(i.event_id)).cloned());
+                    let style = world
+                        .get_resource::<EventPopupStyle>()
+                        .cloned()
+                        .unwrap_or_default();
+                    let kw_reg = world
+                        .get_resource::<KeywordRegistry>()
+                        .cloned()
+                        .unwrap_or_default();
 
                     if let (Some(inst), Some(def)) = (inst, def) {
                         let mut chosen_next: Option<teleology_core::EventId> = None;
                         let mut close = false;
-                        egui::Window::new(def.title.clone())
+
+                        // Build styled frame
+                        let [br, bg, bb, ba] = style.bg_color;
+                        let frame = egui::Frame::none()
+                            .fill(egui::Color32::from_rgba_unmultiplied(br, bg, bb, ba))
+                            .inner_margin(egui::Margin::same(12.0))
+                            .rounding(6.0)
+                            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(
+                                br.saturating_add(40), bg.saturating_add(40), bb.saturating_add(40), ba,
+                            )));
+
+                        let mut win = egui::Window::new("")
+                            .title_bar(false)
                             .collapsible(false)
                             .resizable(false)
-                            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                            .show(ctx, |ui| {
-                                ui.label(&def.body);
-                                ui.add_space(8.0);
-                                for ch in &def.choices {
-                                    if ui.button(&ch.text).clicked() {
-                                        close = true;
-                                        chosen_next = ch.next_event;
+                            .frame(frame);
+
+                        // Anchor / position
+                        match style.anchor {
+                            PopupAnchor::Center => {
+                                win = win.anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]);
+                            }
+                            PopupAnchor::Fixed { x, y } => {
+                                win = win.fixed_pos([x, y]);
+                            }
+                        }
+
+                        // Width
+                        if style.width > 0.0 {
+                            win = win.fixed_size([style.width, 0.0]);
+                        }
+
+                        win.show(ctx, |ui| {
+                            // Title
+                            let [tr, tg, tb, ta] = style.title_color;
+                            let title_size = if style.title_font_size > 0.0 { style.title_font_size } else { 18.0 };
+                            ui.label(
+                                egui::RichText::new(&def.title)
+                                    .font(egui::FontId::proportional(title_size))
+                                    .strong()
+                                    .color(egui::Color32::from_rgba_unmultiplied(tr, tg, tb, ta)),
+                            );
+                            ui.add_space(4.0);
+                            ui.separator();
+                            ui.add_space(4.0);
+
+                            // Image: per-event image overrides global style image
+                            let (img_path, img_w, img_h) = if !def.image.is_empty() {
+                                (def.image.as_str(), def.image_w, def.image_h)
+                            } else if !style.image_path.is_empty() {
+                                (style.image_path.as_str(), style.image_w, style.image_h)
+                            } else {
+                                ("", 0.0, 0.0)
+                            };
+                            if !img_path.is_empty() {
+                                let disp_w = if img_w > 0.0 { img_w } else { 200.0 };
+                                let disp_h = if img_h > 0.0 { img_h } else { 100.0 };
+                                let (r, _) = ui.allocate_exact_size(
+                                    egui::vec2(disp_w, disp_h),
+                                    egui::Sense::hover(),
+                                );
+                                // Try to load image texture
+                                if !self.project_thumbnails.contains_key(std::path::Path::new(img_path)) {
+                                    if let Some(tex) = load_image_texture(ctx, std::path::Path::new(img_path)) {
+                                        self.project_thumbnails.insert(std::path::PathBuf::from(img_path), tex);
                                     }
                                 }
-                            });
+                                if let Some(tex) = self.project_thumbnails.get(std::path::Path::new(img_path)) {
+                                    ui.painter().image(
+                                        tex.id(),
+                                        r,
+                                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                                        egui::Color32::WHITE,
+                                    );
+                                } else {
+                                    ui.painter().rect_filled(
+                                        r,
+                                        4.0,
+                                        egui::Color32::from_rgba_unmultiplied(60, 60, 80, 180),
+                                    );
+                                    ui.painter().text(
+                                        r.center(),
+                                        egui::Align2::CENTER_CENTER,
+                                        img_path,
+                                        egui::FontId::proportional(10.0),
+                                        egui::Color32::from_gray(140),
+                                    );
+                                }
+                                ui.add_space(6.0);
+                            }
+
+                            // Body (with keyword highlighting)
+                            let [dr, dg, db, da] = style.body_color;
+                            let body_size = if style.body_font_size > 0.0 { style.body_font_size } else { 14.0 };
+                            let body_color = egui::Color32::from_rgba_unmultiplied(dr, dg, db, da);
+                            let body_font = egui::FontId::proportional(body_size);
+                            render_keyword_text(
+                                ui,
+                                &def.body,
+                                body_font,
+                                body_color,
+                                &kw_reg,
+                                &mut self.project_thumbnails,
+                                ctx,
+                            );
+                            ui.add_space(10.0);
+
+                            // Choice buttons
+                            let [cr, cg, cb, _ca] = style.button_color;
+                            for ch in &def.choices {
+                                let btn = egui::Button::new(
+                                    egui::RichText::new(&ch.text)
+                                        .color(egui::Color32::from_rgb(cr, cg, cb)),
+                                );
+                                if ui.add_sized([ui.available_width(), 28.0], btn).clicked() {
+                                    close = true;
+                                    chosen_next = ch.next_event;
+                                }
+                                ui.add_space(2.0);
+                            }
+                        });
 
                         if close {
                             if let Some(mut active) = world.get_resource_mut::<ActiveEvent>() {
@@ -2327,6 +3905,9 @@ impl EditorApp {
                                 effects_payload: Vec::new(),
                             },
                         ],
+                        image: String::new(),
+                        image_w: 0.0,
+                        image_h: 0.0,
                     });
                     queue_event(world, id, teleology_core::EventScope::global(), Vec::new());
                 }
@@ -2395,6 +3976,106 @@ impl EditorApp {
                 } else {
                     ui.label("Character generator in use.");
                 }
+            });
+
+            ui.separator();
+            ui.collapsing("UI Prefabs", |ui| {
+                let has_registry = world.get_resource::<UiPrefabRegistry>().is_some();
+                if !has_registry {
+                    if ui.button("Initialize prefab registry").clicked() {
+                        world.insert_resource(UiPrefabRegistry::new());
+                    }
+                    ui.label("Prefab registry initializes on first use (script API or button above).");
+                    return;
+                }
+
+                let prefab_count = world.get_resource::<UiPrefabRegistry>()
+                    .map(|r| r.prefabs.len()).unwrap_or(0);
+                ui.label(format!("Prefabs: {}", prefab_count));
+
+                // List all prefabs
+                let names: Vec<String> = world.get_resource::<UiPrefabRegistry>()
+                    .map(|r| r.names_sorted().into_iter().map(String::from).collect())
+                    .unwrap_or_default();
+
+                let mut to_delete: Option<String> = None;
+                let mut to_preview: Option<String> = None;
+                for name in &names {
+                    ui.horizontal(|ui| {
+                        ui.label(name);
+                        let cmd_count = world.get_resource::<UiPrefabRegistry>()
+                            .and_then(|r| r.get(name))
+                            .map(|p| p.commands.len())
+                            .unwrap_or(0);
+                        ui.label(
+                            egui::RichText::new(format!("({} cmds)", cmd_count))
+                                .small()
+                                .color(ui.visuals().weak_text_color()),
+                        );
+                        if ui.small_button("Preview").clicked() {
+                            to_preview = Some(name.clone());
+                        }
+                        if ui.small_button("Delete").clicked() {
+                            to_delete = Some(name.clone());
+                        }
+                    });
+                }
+                if let Some(name) = to_delete {
+                    if let Some(mut reg) = world.get_resource_mut::<UiPrefabRegistry>() {
+                        reg.remove(&name);
+                    }
+                }
+                // Preview: instantiate with empty params into the command buffer
+                if let Some(name) = to_preview {
+                    let expanded = world.get_resource::<UiPrefabRegistry>()
+                        .and_then(|r| r.get(&name).cloned())
+                        .map(|p| p.instantiate(&[]));
+                    if let Some(cmds) = expanded {
+                        if let Some(mut buf) = world.get_resource_mut::<UiCommandBuffer>() {
+                            for cmd in cmds {
+                                buf.commands.push(cmd);
+                            }
+                        }
+                    }
+                }
+
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        if ui.button("Save all…").clicked() {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .add_filter("JSON", &["json"])
+                                .set_file_name("ui_prefabs.json")
+                                .save_file()
+                            {
+                                if let Some(reg) = world.get_resource::<UiPrefabRegistry>() {
+                                    let _ = reg.save_to_file(&path);
+                                }
+                            }
+                        }
+                        if ui.button("Load all…").clicked() {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .add_filter("JSON", &["json"])
+                                .pick_file()
+                            {
+                                if let Ok(reg) = UiPrefabRegistry::load_from_file(&path) {
+                                    world.insert_resource(reg);
+                                }
+                            }
+                        }
+                        if ui.button("Load prefab…").clicked() {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .add_filter("JSON", &["json"])
+                                .pick_file()
+                            {
+                                if let Some(mut reg) = world.get_resource_mut::<UiPrefabRegistry>() {
+                                    let _ = reg.load_prefab(&path);
+                                }
+                            }
+                        }
+                    }
+                });
             });
         });
     }

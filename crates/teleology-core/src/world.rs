@@ -551,12 +551,25 @@ impl WorldBuilder {
         self
     }
 
-    /// Square grid map (pre-filled with cycling province ids).
+    /// Square grid map (pre-filled with contiguous rectangular province blocks).
     pub fn map_size(mut self, width: u32, height: u32) -> Self {
         let mut map = MapLayout::new(width, height);
-        let n = self.province_count as usize;
-        for i in 0..map.tiles.len() {
-            map.tiles[i] = ((i % n) as u32) + 1;
+        let n = self.province_count;
+        if n > 0 {
+            // Divide the map into a grid of contiguous rectangular blocks,
+            // one per province.  This keeps each province's tiles adjacent
+            // so painting ownership behaves intuitively.
+            let ratio = width as f64 / height as f64;
+            let grid_rows = ((n as f64 / ratio).sqrt()).round().max(1.0) as u32;
+            let grid_cols = ((n as f64 / grid_rows as f64).ceil()).max(1.0) as u32;
+            for y in 0..height {
+                for x in 0..width {
+                    let col = (x * grid_cols / width).min(grid_cols - 1);
+                    let row = (y * grid_rows / height).min(grid_rows - 1);
+                    let idx = row * grid_cols + col;
+                    map.set(x, y, idx.min(n - 1) + 1);
+                }
+            }
         }
         self.map_kind = Some(MapKind::Square(map));
         self
@@ -568,12 +581,22 @@ impl WorldBuilder {
         self
     }
 
-    /// Hex grid map (axial q,r; pre-filled with cycling province ids).
+    /// Hex grid map (axial q,r; pre-filled with contiguous province blocks).
     pub fn map_hex(mut self, width: u32, height: u32) -> Self {
         let mut hex = HexMapLayout::new(width, height);
-        let n = self.province_count as usize;
-        for i in 0..hex.tiles.len() {
-            hex.tiles[i] = ((i % n) as u32) + 1;
+        let n = self.province_count;
+        if n > 0 {
+            let ratio = width as f64 / height as f64;
+            let grid_rows = ((n as f64 / ratio).sqrt()).round().max(1.0) as u32;
+            let grid_cols = ((n as f64 / grid_rows as f64).ceil()).max(1.0) as u32;
+            for r in 0..height {
+                for q in 0..width {
+                    let col = (q * grid_cols / width).min(grid_cols - 1);
+                    let row = (r * grid_rows / height).min(grid_rows - 1);
+                    let idx = row * grid_cols + col;
+                    hex.set(q, r, idx.min(n - 1) + 1);
+                }
+            }
         }
         self.map_kind = Some(MapKind::Hex(hex));
         self

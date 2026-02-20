@@ -112,6 +112,385 @@ int          teleology_input_last_click(TeleologyEngine* engine, float* x_out, f
 /* Returns 1 if key is currently down; 0 otherwise. */
 int          teleology_input_key_down(TeleologyEngine* engine, uint32_t key_code);
 
+/* --- Game UI (immediate-mode; call during tick; rendered by engine each frame) ---
+ *
+ * Scripts declare UI each frame by calling begin/end pairs and widget functions.
+ * The engine renders them after the tick. Button clicks are available next frame
+ * via teleology_ui_button_was_clicked().
+ *
+ * Example:
+ *   teleology_ui_begin_window(engine, "HUD", 0, 0, 400, 40);
+ *     teleology_ui_label(engine, "Gold: 1234");
+ *     teleology_ui_button(engine, 1, "Diplomacy");
+ *   teleology_ui_end_window(engine);
+ *   if (teleology_ui_button_was_clicked(engine, 1)) { ... }
+ */
+
+/* Containers */
+void         teleology_ui_begin_window(TeleologyEngine* engine, const char* title, float x, float y, float w, float h);
+void         teleology_ui_end_window(TeleologyEngine* engine);
+void         teleology_ui_begin_horizontal(TeleologyEngine* engine);
+void         teleology_ui_end_horizontal(TeleologyEngine* engine);
+void         teleology_ui_begin_vertical(TeleologyEngine* engine);
+void         teleology_ui_end_vertical(TeleologyEngine* engine);
+
+/* Widgets */
+void         teleology_ui_label(TeleologyEngine* engine, const char* text);
+void         teleology_ui_label_sized(TeleologyEngine* engine, const char* text, float font_size);
+void         teleology_ui_button(TeleologyEngine* engine, uint32_t id, const char* text);
+/* Returns 1 if the button with this id was clicked last frame; 0 otherwise. */
+uint8_t      teleology_ui_button_was_clicked(TeleologyEngine* engine, uint32_t id);
+void         teleology_ui_progress_bar(TeleologyEngine* engine, float fraction, const char* text, float width);
+void         teleology_ui_image(TeleologyEngine* engine, const char* path, float w, float h);
+void         teleology_ui_separator(TeleologyEngine* engine);
+void         teleology_ui_spacing(TeleologyEngine* engine, float amount);
+
+/* Styling (applies to the next widget only) */
+void         teleology_ui_set_color(TeleologyEngine* engine, uint8_t r, uint8_t g, uint8_t b, uint8_t a);
+void         teleology_ui_set_font_size(TeleologyEngine* engine, float size);
+
+/* --- UI Prefabs (reusable templates; record, instantiate, save/load) ---
+ *
+ * Record a prefab: call prefab_begin, then any teleology_ui_* calls (they go
+ * into the recording buffer instead of rendering), then prefab_end to save it.
+ * Text fields may contain {0}, {1}, … placeholders for substitution.
+ *
+ * Instantiate: prefab_instantiate replays the saved commands into the render
+ * buffer, substituting placeholders with the NUL-separated params string.
+ *
+ * Example:
+ *   // Record once (e.g. in on_init)
+ *   teleology_ui_prefab_begin(engine, "resource_bar");
+ *     teleology_ui_begin_horizontal(engine);
+ *       teleology_ui_label(engine, "{0}:");
+ *       teleology_ui_progress_bar(engine, 0.0f, "{1}", 200.0f);
+ *     teleology_ui_end_horizontal(engine);
+ *   teleology_ui_prefab_end(engine);
+ *
+ *   // Use every frame (in on_daily_tick)
+ *   teleology_ui_prefab_instantiate(engine, "resource_bar", "Gold\0""75%\0");
+ */
+
+/* Recording */
+void         teleology_ui_prefab_begin(TeleologyEngine* engine, const char* name);
+void         teleology_ui_prefab_end(TeleologyEngine* engine);
+
+/* Instantiation (params: NUL-separated, double-NUL-terminated) */
+uint8_t      teleology_ui_prefab_instantiate(TeleologyEngine* engine, const char* name, const char* params);
+
+/* Management */
+uint8_t      teleology_ui_prefab_delete(TeleologyEngine* engine, const char* name);
+uint32_t     teleology_ui_prefab_count(TeleologyEngine* engine);
+
+/* Persistence */
+uint8_t      teleology_ui_prefab_save(TeleologyEngine* engine, const char* name, const char* path);
+uint8_t      teleology_ui_prefab_load(TeleologyEngine* engine, const char* path);
+uint8_t      teleology_ui_prefab_save_all(TeleologyEngine* engine, const char* path);
+uint8_t      teleology_ui_prefab_load_all(TeleologyEngine* engine, const char* path);
+
+/* --- Pop-up events (define, queue, display, choose) ---
+ *
+ * Scripts can define events at runtime, queue them for display, and handle
+ * the player's choice. The engine renders styled pop-up windows.
+ *
+ * Basic workflow:
+ *   // In on_init: define events (or use templates)
+ *   uint32_t evt = teleology_event_define(engine, "Rebellion!", "Peasants revolt in your lands.");
+ *   teleology_event_add_choice(engine, evt, "Crush them", 0);
+ *   teleology_event_add_choice(engine, evt, "Negotiate", 0);
+ *
+ *   // In on_daily_tick: queue when conditions met
+ *   teleology_event_queue(engine, evt, 0, 0);  // global scope
+ *
+ *   // In on_daily_tick: check for player response
+ *   uint32_t choices;
+ *   uint32_t active = teleology_event_get_active(engine, &choices);
+ *   if (active != 0) {
+ *       // Event is showing — player hasn't chosen yet
+ *       // (or call teleology_event_choose to auto-resolve from script)
+ *   }
+ *
+ * Templates (ready-made events you can customize):
+ *   uint32_t ids[5];
+ *   teleology_event_register_templates(engine, ids);
+ *   // ids: [0]=Notification, [1]=BinaryChoice, [2]=ThreeWay, [3]=Narrative, [4]=Diplomatic
+ *   teleology_event_set_title(engine, ids[0], "Custom Title");
+ *   teleology_event_set_body(engine, ids[0], "Custom body text.");
+ *   teleology_event_queue(engine, ids[0], 0, 0);
+ */
+
+/* Event definition */
+uint32_t     teleology_event_define(TeleologyEngine* engine, const char* title, const char* body);
+/* Template: 0=Notification, 1=BinaryChoice, 2=ThreeWay, 3=Narrative, 4=Diplomatic */
+uint32_t     teleology_event_from_template(TeleologyEngine* engine, uint32_t template);
+int32_t      teleology_event_add_choice(TeleologyEngine* engine, uint32_t event_id, const char* text, uint32_t next_event_id);
+uint8_t      teleology_event_set_choice_text(TeleologyEngine* engine, uint32_t event_id, uint32_t choice_idx, const char* text);
+uint8_t      teleology_event_set_title(TeleologyEngine* engine, uint32_t event_id, const char* title);
+uint8_t      teleology_event_set_body(TeleologyEngine* engine, uint32_t event_id, const char* body);
+/* Set per-event image. path is relative to project resources dir. w/h=0 for natural size. */
+uint8_t      teleology_event_set_image(TeleologyEngine* engine, uint32_t event_id, const char* path, float w, float h);
+
+/* Event lifecycle */
+/* scope_type: 0=Global, 1=Province, 2=Nation, 3=Character, 4=Army */
+void         teleology_event_queue(TeleologyEngine* engine, uint32_t event_id, uint32_t scope_type, uint32_t scope_raw);
+/* Returns active event_id (0 if none). Writes choice count to out. */
+uint32_t     teleology_event_get_active(TeleologyEngine* engine, uint32_t* choice_count_out);
+/* field: 0=title, 1=body. Writes NUL-terminated; returns full length. */
+uint32_t     teleology_event_get_text(TeleologyEngine* engine, uint32_t field, char* out, uint32_t out_cap);
+uint32_t     teleology_event_get_choice_text(TeleologyEngine* engine, uint32_t choice_idx, char* out, uint32_t out_cap);
+/* Choose an option (0-based). Clears active event and chains to next. */
+uint8_t      teleology_event_choose(TeleologyEngine* engine, uint32_t choice_idx);
+
+/* Register all 5 built-in templates. Writes 5 event IDs to ids_out. */
+void         teleology_event_register_templates(TeleologyEngine* engine, uint32_t* ids_out);
+
+/* Pop-up styling (set before queueing; applies to next displayed event) */
+void         teleology_event_style_reset(TeleologyEngine* engine);
+/* anchor: 0=Center, 1=Fixed(x,y) */
+void         teleology_event_style_set_anchor(TeleologyEngine* engine, uint32_t anchor, float x, float y);
+void         teleology_event_style_set_colors(TeleologyEngine* engine,
+                uint8_t bg_r, uint8_t bg_g, uint8_t bg_b, uint8_t bg_a,
+                uint8_t title_r, uint8_t title_g, uint8_t title_b, uint8_t title_a,
+                uint8_t body_r, uint8_t body_g, uint8_t body_b, uint8_t body_a);
+void         teleology_event_style_set_image(TeleologyEngine* engine, const char* path, float w, float h);
+/* width: 0=auto. modal: 1=pause game while showing. */
+void         teleology_event_style_set_layout(TeleologyEngine* engine, float width, uint8_t modal);
+
+/* --- Keyword tooltip system ---
+ *
+ * Register keywords that are automatically highlighted in event pop-up text.
+ * When the player hovers a keyword, a tooltip panel appears with its
+ * title, description, and optional icon.
+ *
+ * Example:
+ *   uint32_t idx = teleology_keyword_add(engine, "Prestige", "Prestige",
+ *       "A measure of your realm's renown. Affects diplomacy, vassal opinion, and succession.");
+ *   teleology_keyword_set_color(engine, idx, 255, 215, 0, 255);  // gold
+ *   teleology_keyword_set_icon(engine, idx, "icons/prestige.png");
+ */
+
+/* Add a keyword. Returns index (0xFFFFFFFF on failure). */
+uint32_t     teleology_keyword_add(TeleologyEngine* engine, const char* keyword, const char* title, const char* description);
+/* Set icon image for keyword tooltip. */
+uint8_t      teleology_keyword_set_icon(TeleologyEngine* engine, uint32_t index, const char* path);
+/* Set highlight color (RGBA) for keyword in text. 0,0,0,0 = default gold. */
+uint8_t      teleology_keyword_set_color(TeleologyEngine* engine, uint32_t index, uint8_t r, uint8_t g, uint8_t b, uint8_t a);
+/* Remove a keyword by index. */
+uint8_t      teleology_keyword_remove(TeleologyEngine* engine, uint32_t index);
+/* Remove all keywords. */
+void         teleology_keyword_clear(TeleologyEngine* engine);
+/* Get the number of registered keywords. */
+uint32_t     teleology_keyword_count(TeleologyEngine* engine);
+
+/* Load keywords from a JSON file (appends to existing).
+ * Returns number of keywords loaded, or 0xFFFFFFFF on error.
+ *
+ * JSON format: array of objects with keyword, title, description,
+ * and optional icon (string) and color ([r,g,b,a] array).
+ *
+ * Example keywords.json:
+ *   [
+ *     {
+ *       "keyword": "Prestige",
+ *       "title": "Prestige",
+ *       "description": "A measure of your realm's renown.",
+ *       "icon": "icons/prestige.png",
+ *       "color": [255, 215, 0, 255]
+ *     },
+ *     {
+ *       "keyword": "Casus Belli",
+ *       "title": "Casus Belli",
+ *       "description": "A justification for declaring war."
+ *     }
+ *   ]
+ *
+ * The engine also auto-loads "keywords.json" from the working directory
+ * on startup if the file exists.
+ */
+uint32_t     teleology_keyword_load_file(TeleologyEngine* engine, const char* path);
+/* Save current keywords to a JSON file (pretty-printed). */
+uint8_t      teleology_keyword_save_file(TeleologyEngine* engine, const char* path);
+
+/* --- Raycasting / coordinate conversion (screen <-> world <-> tile) ---
+ *
+ * The engine maintains a Viewport resource describing the current map view
+ * (zoom, pan, canvas rect). The editor feeds this each frame. Scripts can
+ * query it to convert screen coordinates to world/tile coordinates and
+ * perform hit-testing against provinces.
+ *
+ * Example:
+ *   float sx, sy;
+ *   if (teleology_input_last_click(engine, &sx, &sy)) {
+ *       CRaycastHit hit = teleology_raycast(engine, sx, sy);
+ *       if (hit.province_raw != 0) {
+ *           // clicked on province hit.province_raw at tile (hit.tile_x, hit.tile_y)
+ *       }
+ *   }
+ */
+
+typedef struct CRaycastHit {
+    uint32_t province_raw;  /* 0 = miss / no province */
+    int32_t  tile_x;        /* -1 if not applicable (irregular maps) */
+    int32_t  tile_y;
+    float    world_x;
+    float    world_y;
+} CRaycastHit;
+
+/* Update viewport state (called by host/editor each frame; scripts usually don't need this). */
+void         teleology_viewport_set(TeleologyEngine* engine, float base_cell, float zoom, float pan_x, float pan_y, float canvas_x, float canvas_y, float canvas_w, float canvas_h);
+
+/* Raycast: screen coords -> province/tile/world. Returns CRaycastHit. */
+CRaycastHit  teleology_raycast(TeleologyEngine* engine, float screen_x, float screen_y);
+
+/* Coordinate conversion */
+void         teleology_screen_to_world(TeleologyEngine* engine, float screen_x, float screen_y, float* x_out, float* y_out);
+void         teleology_world_to_screen(TeleologyEngine* engine, float world_x, float world_y, float* x_out, float* y_out);
+
+/* Screen -> tile. Returns 1 if valid tile, 0 if out of bounds. */
+uint8_t      teleology_screen_to_tile(TeleologyEngine* engine, float screen_x, float screen_y, int32_t* tile_x_out, int32_t* tile_y_out);
+
+/* Tile distance (Chebyshev for square grids, axial for hex; 0 for irregular). */
+uint32_t     teleology_tile_distance(TeleologyEngine* engine, uint32_t x0, uint32_t y0, uint32_t x1, uint32_t y1);
+
+/* ==========================================================================
+ * Province & Nation extended fields
+ * ========================================================================== */
+
+/* Province fields */
+uint8_t      teleology_get_province_terrain(TeleologyEngine* engine, CProvinceId province);
+void         teleology_set_province_terrain(TeleologyEngine* engine, CProvinceId province, uint8_t terrain);
+/* index: 0=tax, 1=production, 2=manpower */
+uint16_t     teleology_get_province_development(TeleologyEngine* engine, CProvinceId province, uint32_t index);
+void         teleology_set_province_development(TeleologyEngine* engine, CProvinceId province, uint32_t index, uint16_t value);
+uint32_t     teleology_get_province_population(TeleologyEngine* engine, CProvinceId province);
+void         teleology_set_province_population(TeleologyEngine* engine, CProvinceId province, uint32_t value);
+/* Returns CNationId with raw=0 if not occupied. */
+CNationId    teleology_get_province_occupation(TeleologyEngine* engine, CProvinceId province);
+void         teleology_set_province_occupation(TeleologyEngine* engine, CProvinceId province, CNationId nation);
+
+/* Nation fields */
+uint32_t     teleology_get_nation_count(TeleologyEngine* engine);
+int64_t      teleology_get_nation_treasury(TeleologyEngine* engine, CNationId nation);
+void         teleology_set_nation_treasury(TeleologyEngine* engine, CNationId nation, int64_t value);
+int8_t       teleology_get_nation_stability(TeleologyEngine* engine, CNationId nation);
+void         teleology_set_nation_stability(TeleologyEngine* engine, CNationId nation, int8_t value);
+int32_t      teleology_get_nation_prestige(TeleologyEngine* engine, CNationId nation);
+void         teleology_set_nation_prestige(TeleologyEngine* engine, CNationId nation, int32_t value);
+uint32_t     teleology_get_nation_manpower(TeleologyEngine* engine, CNationId nation);
+void         teleology_set_nation_manpower(TeleologyEngine* engine, CNationId nation, uint32_t value);
+float        teleology_get_nation_war_exhaustion(TeleologyEngine* engine, CNationId nation);
+void         teleology_set_nation_war_exhaustion(TeleologyEngine* engine, CNationId nation, float value);
+
+/* ==========================================================================
+ * Diplomacy (relations, wars, alliances, truces)
+ * ========================================================================== */
+
+/* Relations */
+int16_t      teleology_diplomacy_get_opinion(TeleologyEngine* engine, CNationId a, CNationId b);
+int16_t      teleology_diplomacy_get_trust(TeleologyEngine* engine, CNationId a, CNationId b);
+void         teleology_diplomacy_modify_opinion(TeleologyEngine* engine, CNationId a, CNationId b, int16_t delta);
+void         teleology_diplomacy_modify_trust(TeleologyEngine* engine, CNationId a, CNationId b, int16_t delta);
+
+/* Wars: goal_type 0=Conquest, 1=Subjugation, 2=Independence, 3+=Custom.
+ * target_province used for Conquest goals. Returns WarId raw (0 on failure). */
+uint32_t     teleology_diplomacy_declare_war(TeleologyEngine* engine, CNationId attacker, CNationId defender, uint32_t goal_type, uint32_t target_province);
+void         teleology_diplomacy_end_war(TeleologyEngine* engine, uint32_t war_id, int64_t truce_days);
+uint8_t      teleology_diplomacy_are_at_war(TeleologyEngine* engine, CNationId a, CNationId b);
+int16_t      teleology_diplomacy_get_war_score(TeleologyEngine* engine, uint32_t war_id);
+void         teleology_diplomacy_set_war_score(TeleologyEngine* engine, uint32_t war_id, int16_t score);
+
+/* Alliances & truces */
+void         teleology_diplomacy_form_alliance(TeleologyEngine* engine, CNationId a, CNationId b);
+void         teleology_diplomacy_break_alliance(TeleologyEngine* engine, CNationId a, CNationId b);
+uint8_t      teleology_diplomacy_are_allied(TeleologyEngine* engine, CNationId a, CNationId b);
+uint8_t      teleology_diplomacy_has_truce(TeleologyEngine* engine, CNationId a, CNationId b);
+
+/* ==========================================================================
+ * Economy (budgets, goods, trade)
+ * ========================================================================== */
+
+/* Budget queries (values computed by simulation each secondary tick) */
+double       teleology_economy_get_tax_income(TeleologyEngine* engine, CNationId nation);
+double       teleology_economy_get_production_income(TeleologyEngine* engine, CNationId nation);
+double       teleology_economy_get_trade_income(TeleologyEngine* engine, CNationId nation);
+double       teleology_economy_get_total_income(TeleologyEngine* engine, CNationId nation);
+double       teleology_economy_get_total_expenses(TeleologyEngine* engine, CNationId nation);
+double       teleology_economy_get_balance(TeleologyEngine* engine, CNationId nation);
+
+/* Goods */
+uint32_t     teleology_economy_register_good(TeleologyEngine* engine, const char* name, double base_price);
+double       teleology_economy_get_good_price(TeleologyEngine* engine, uint32_t good_id);
+/* Province trade goods: 0 = no good. */
+uint32_t     teleology_economy_get_province_good(TeleologyEngine* engine, CProvinceId province);
+void         teleology_economy_set_province_good(TeleologyEngine* engine, CProvinceId province, uint32_t good_id);
+double       teleology_economy_get_province_trade_power(TeleologyEngine* engine, CProvinceId province);
+void         teleology_economy_set_province_trade_power(TeleologyEngine* engine, CProvinceId province, double value);
+
+/* ==========================================================================
+ * Population (pop groups, unrest, revolts)
+ * ========================================================================== */
+
+uint32_t     teleology_pop_total(TeleologyEngine* engine, CProvinceId province);
+float        teleology_pop_average_unrest(TeleologyEngine* engine, CProvinceId province);
+uint32_t     teleology_pop_group_count(TeleologyEngine* engine, CProvinceId province);
+uint32_t     teleology_pop_group_size(TeleologyEngine* engine, CProvinceId province, uint32_t index);
+float        teleology_pop_group_unrest(TeleologyEngine* engine, CProvinceId province, uint32_t index);
+/* Returns culture/religion TagId raw for the pop group. */
+uint32_t     teleology_pop_group_culture(TeleologyEngine* engine, CProvinceId province, uint32_t index);
+uint32_t     teleology_pop_group_religion(TeleologyEngine* engine, CProvinceId province, uint32_t index);
+/* Add a new pop group to a province. culture/religion are TagId raws. */
+void         teleology_pop_add_group(TeleologyEngine* engine, CProvinceId province, uint32_t culture, uint32_t religion, uint32_t size);
+/* Check for revolts. Writes up to cap results to out arrays. Returns total revolt count. */
+uint32_t     teleology_pop_check_revolts(TeleologyEngine* engine, uint32_t* out_provinces, uint32_t* out_strengths, uint32_t cap);
+
+/* ==========================================================================
+ * Modifiers (stackable province/nation effects)
+ * ========================================================================== */
+
+/* op: 0=Additive, 1=Multiplicative, 2=Set, 3+=Custom.
+ * Returns ModifierId raw (0 on failure). */
+uint32_t     teleology_modifier_add_province(TeleologyEngine* engine, CProvinceId province, uint32_t type_id, uint32_t op, double value, uint32_t source_id);
+uint32_t     teleology_modifier_add_nation(TeleologyEngine* engine, CNationId nation, uint32_t type_id, uint32_t op, double value, uint32_t source_id);
+uint8_t      teleology_modifier_remove_province(TeleologyEngine* engine, CProvinceId province, uint32_t modifier_id);
+uint8_t      teleology_modifier_remove_nation(TeleologyEngine* engine, CNationId nation, uint32_t modifier_id);
+/* Returns number of active modifiers. */
+uint32_t     teleology_modifier_list_province(TeleologyEngine* engine, CProvinceId province);
+uint32_t     teleology_modifier_list_nation(TeleologyEngine* engine, CNationId nation);
+/* Apply all modifiers of a given type_id for a scope to a base value.
+ * scope_kind: 0=Province, 1=Nation. Returns the modified value. */
+double       teleology_modifier_apply(TeleologyEngine* engine, double base, uint32_t type_id, uint32_t scope_kind, uint32_t scope_id);
+
+/* ==========================================================================
+ * Characters (leaders, generals, advisors)
+ * ========================================================================== */
+
+/* Spawn a character. Returns persistent_id (0 on failure). birth_year=0 for unset. */
+uint64_t     teleology_character_spawn(TeleologyEngine* engine, uint32_t name_id, int32_t birth_year);
+/* role: 0=Leader, 1=General, 2=Advisor, 3+=Custom. army raw id for generals. */
+void         teleology_character_set_role(TeleologyEngine* engine, uint64_t persistent_id, uint32_t role, CNationId nation, uint32_t army);
+/* stat: 0=military, 1=diplomacy, 2=administration. */
+int16_t      teleology_character_get_stat(TeleologyEngine* engine, uint64_t persistent_id, uint32_t stat);
+void         teleology_character_set_stat(TeleologyEngine* engine, uint64_t persistent_id, uint32_t stat, int16_t value);
+/* Custom stats keyed by game-defined id. */
+int32_t      teleology_character_get_custom_stat(TeleologyEngine* engine, uint64_t persistent_id, uint32_t stat_id);
+void         teleology_character_set_custom_stat(TeleologyEngine* engine, uint64_t persistent_id, uint32_t stat_id, int32_t value);
+void         teleology_character_kill(TeleologyEngine* engine, uint64_t persistent_id, int32_t death_year);
+
+/* ==========================================================================
+ * Combat (model selection, unit types, battle results)
+ * ========================================================================== */
+
+/* model: 0=StackBased, 1=OneUnitPerTile, 2=Deployment, 3=TacticalGrid. */
+void         teleology_combat_set_model(TeleologyEngine* engine, uint8_t model);
+uint8_t      teleology_combat_get_model(TeleologyEngine* engine);
+/* category: 0=Infantry, 1=Cavalry, 2=Ranged, 3=Siege, 4=Naval, 5+=Custom.
+ * Returns UnitTypeId raw (0 on failure). */
+uint32_t     teleology_combat_register_unit_type(TeleologyEngine* engine, const char* name, uint32_t category, uint16_t strength, uint16_t morale, uint8_t speed);
+uint32_t     teleology_combat_result_count(TeleologyEngine* engine);
+/* Returns location province raw (0 if invalid index).
+ * winner_out: 0=Attacker, 1=Defender, 2=Draw. */
+uint32_t     teleology_combat_result_get(TeleologyEngine* engine, uint32_t index, uint32_t* attacker_casualties_out, uint32_t* defender_casualties_out, uint8_t* winner_out);
+
 #ifdef __cplusplus
 }
 #endif
