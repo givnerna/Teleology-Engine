@@ -4,6 +4,7 @@
 mod audio;
 mod video;
 
+use bevy_ecs::entity::Entity;
 use std::cell::UnsafeCell;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -13,12 +14,25 @@ use teleology_core::{
     ActiveEvent, EventChoice, EventDefinition, EventId, EventPopupStyle, EventQueue,
     EventRegistry, EventScope, EventTemplate, KeywordEntry, KeywordRegistry,
     PopupAnchor, queue_event, register_builtin_templates,
-    GameDate, GameWorld, NationId, NationTags, ProvinceId, ProvinceStore, ProvinceTags,
+    GameDate, GameWorld, NationId, NationStore, NationTags, ProvinceId, ProvinceStore, ProvinceTags,
     ProgressState, ProgressTrees, SimulationSchedule, TagId, TagRegistry, TagTypeId, WorldBuilder,
     WorldBounds, WorldSimulation,
     UiCommand, UiCommandBuffer, UiPrefabRegistry, Viewport,
     raycast, screen_to_world, world_to_screen, screen_to_tile_square, screen_to_tile_hex,
     tile_distance_square, tile_distance_hex, RaycastHit, MapKind,
+    // Diplomacy
+    DiplomaticRelations, WarRegistry, DiplomacyConfig, WarGoal, WarId,
+    // Economy
+    EconomyConfig, NationBudgets, GoodsRegistry, ProvinceEconomy, TradeNetwork,
+    // Population
+    PopulationConfig, ProvincePops, check_revolts,
+    // Modifiers
+    ProvinceModifiers, NationModifiers, Modifier, ModifierValue, ModifierId, ModifierTypeId,
+    apply_modifiers,
+    // Characters
+    Character, CharacterRole, CharacterStats, spawn_character,
+    // Combat
+    CombatModel, CombatResultLog, UnitTypeRegistry, UnitCategory, BattleSide,
 };
 use teleology_script_api::{
     load_script_api, CArmyId, CGameDate, CGameTime, CNodeId, CNationId, CProvinceId, CTagId,
@@ -1734,6 +1748,1019 @@ pub extern "C" fn teleology_tile_distance(
         MapKind::Hex(_) => tile_distance_hex(x0, y0, x1, y1),
         MapKind::Irregular(_) => 0,
     }
+}
+
+// ===========================================================================
+// Phase 1: Province & Nation extended field accessors
+// ===========================================================================
+
+#[no_mangle]
+pub extern "C" fn teleology_get_province_terrain(engine: *mut TeleologyEngine, province: CProvinceId) -> u8 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0 };
+    let world = unsafe { &*ctx.world.get() };
+    let Some(pid) = NonZeroU32::new(province.raw) else { return 0 };
+    world.get_resource::<ProvinceStore>()
+        .and_then(|s| s.get(ProvinceId(pid)))
+        .map(|p| p.terrain)
+        .unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_set_province_terrain(engine: *mut TeleologyEngine, province: CProvinceId, terrain: u8) {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return };
+    let world = unsafe { &mut *ctx.world.get() };
+    let Some(pid) = NonZeroU32::new(province.raw) else { return };
+    let Some(mut store) = world.get_resource_mut::<ProvinceStore>() else { return };
+    if let Some(p) = store.get_mut(ProvinceId(pid)) { p.terrain = terrain; }
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_get_province_development(engine: *mut TeleologyEngine, province: CProvinceId, index: u32) -> u16 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0 };
+    let world = unsafe { &*ctx.world.get() };
+    let Some(pid) = NonZeroU32::new(province.raw) else { return 0 };
+    world.get_resource::<ProvinceStore>()
+        .and_then(|s| s.get(ProvinceId(pid)))
+        .and_then(|p| p.development.get(index as usize).copied())
+        .unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_set_province_development(engine: *mut TeleologyEngine, province: CProvinceId, index: u32, value: u16) {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return };
+    let world = unsafe { &mut *ctx.world.get() };
+    let Some(pid) = NonZeroU32::new(province.raw) else { return };
+    let Some(mut store) = world.get_resource_mut::<ProvinceStore>() else { return };
+    if let Some(p) = store.get_mut(ProvinceId(pid)) {
+        if let Some(slot) = p.development.get_mut(index as usize) { *slot = value; }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_get_province_population(engine: *mut TeleologyEngine, province: CProvinceId) -> u32 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0 };
+    let world = unsafe { &*ctx.world.get() };
+    let Some(pid) = NonZeroU32::new(province.raw) else { return 0 };
+    world.get_resource::<ProvinceStore>()
+        .and_then(|s| s.get(ProvinceId(pid)))
+        .map(|p| p.population)
+        .unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_set_province_population(engine: *mut TeleologyEngine, province: CProvinceId, value: u32) {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return };
+    let world = unsafe { &mut *ctx.world.get() };
+    let Some(pid) = NonZeroU32::new(province.raw) else { return };
+    let Some(mut store) = world.get_resource_mut::<ProvinceStore>() else { return };
+    if let Some(p) = store.get_mut(ProvinceId(pid)) { p.population = value; }
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_get_province_occupation(engine: *mut TeleologyEngine, province: CProvinceId) -> CNationId {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return CNationId { raw: 0 } };
+    let world = unsafe { &*ctx.world.get() };
+    let Some(pid) = NonZeroU32::new(province.raw) else { return CNationId { raw: 0 } };
+    world.get_resource::<ProvinceStore>()
+        .and_then(|s| s.get(ProvinceId(pid)))
+        .and_then(|p| p.occupation)
+        .map(|n| CNationId { raw: n.0.get() })
+        .unwrap_or(CNationId { raw: 0 })
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_set_province_occupation(engine: *mut TeleologyEngine, province: CProvinceId, nation: CNationId) {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return };
+    let world = unsafe { &mut *ctx.world.get() };
+    let Some(pid) = NonZeroU32::new(province.raw) else { return };
+    let Some(mut store) = world.get_resource_mut::<ProvinceStore>() else { return };
+    if let Some(p) = store.get_mut(ProvinceId(pid)) {
+        p.occupation = NonZeroU32::new(nation.raw).map(NationId);
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_get_nation_count(engine: *mut TeleologyEngine) -> u32 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0 };
+    let world = unsafe { &*ctx.world.get() };
+    world.get_resource::<WorldBounds>().map(|b| b.nation_count).unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_get_nation_treasury(engine: *mut TeleologyEngine, nation: CNationId) -> i64 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0 };
+    let world = unsafe { &*ctx.world.get() };
+    let Some(nid) = NonZeroU32::new(nation.raw) else { return 0 };
+    world.get_resource::<NationStore>()
+        .and_then(|s| s.get(NationId(nid)))
+        .map(|n| n.treasury)
+        .unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_set_nation_treasury(engine: *mut TeleologyEngine, nation: CNationId, value: i64) {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return };
+    let world = unsafe { &mut *ctx.world.get() };
+    let Some(nid) = NonZeroU32::new(nation.raw) else { return };
+    let Some(mut store) = world.get_resource_mut::<NationStore>() else { return };
+    if let Some(n) = store.get_mut(NationId(nid)) { n.treasury = value; }
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_get_nation_stability(engine: *mut TeleologyEngine, nation: CNationId) -> i8 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0 };
+    let world = unsafe { &*ctx.world.get() };
+    let Some(nid) = NonZeroU32::new(nation.raw) else { return 0 };
+    world.get_resource::<NationStore>()
+        .and_then(|s| s.get(NationId(nid)))
+        .map(|n| n.stability)
+        .unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_set_nation_stability(engine: *mut TeleologyEngine, nation: CNationId, value: i8) {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return };
+    let world = unsafe { &mut *ctx.world.get() };
+    let Some(nid) = NonZeroU32::new(nation.raw) else { return };
+    let Some(mut store) = world.get_resource_mut::<NationStore>() else { return };
+    if let Some(n) = store.get_mut(NationId(nid)) { n.stability = value; }
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_get_nation_prestige(engine: *mut TeleologyEngine, nation: CNationId) -> i32 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0 };
+    let world = unsafe { &*ctx.world.get() };
+    let Some(nid) = NonZeroU32::new(nation.raw) else { return 0 };
+    world.get_resource::<NationStore>()
+        .and_then(|s| s.get(NationId(nid)))
+        .map(|n| n.prestige)
+        .unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_set_nation_prestige(engine: *mut TeleologyEngine, nation: CNationId, value: i32) {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return };
+    let world = unsafe { &mut *ctx.world.get() };
+    let Some(nid) = NonZeroU32::new(nation.raw) else { return };
+    let Some(mut store) = world.get_resource_mut::<NationStore>() else { return };
+    if let Some(n) = store.get_mut(NationId(nid)) { n.prestige = value; }
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_get_nation_manpower(engine: *mut TeleologyEngine, nation: CNationId) -> u32 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0 };
+    let world = unsafe { &*ctx.world.get() };
+    let Some(nid) = NonZeroU32::new(nation.raw) else { return 0 };
+    world.get_resource::<NationStore>()
+        .and_then(|s| s.get(NationId(nid)))
+        .map(|n| n.manpower)
+        .unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_set_nation_manpower(engine: *mut TeleologyEngine, nation: CNationId, value: u32) {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return };
+    let world = unsafe { &mut *ctx.world.get() };
+    let Some(nid) = NonZeroU32::new(nation.raw) else { return };
+    let Some(mut store) = world.get_resource_mut::<NationStore>() else { return };
+    if let Some(n) = store.get_mut(NationId(nid)) { n.manpower = value; }
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_get_nation_war_exhaustion(engine: *mut TeleologyEngine, nation: CNationId) -> f32 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0.0 };
+    let world = unsafe { &*ctx.world.get() };
+    let Some(nid) = NonZeroU32::new(nation.raw) else { return 0.0 };
+    world.get_resource::<NationStore>()
+        .and_then(|s| s.get(NationId(nid)))
+        .map(|n| n.war_exhaustion)
+        .unwrap_or(0.0)
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_set_nation_war_exhaustion(engine: *mut TeleologyEngine, nation: CNationId, value: f32) {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return };
+    let world = unsafe { &mut *ctx.world.get() };
+    let Some(nid) = NonZeroU32::new(nation.raw) else { return };
+    let Some(mut store) = world.get_resource_mut::<NationStore>() else { return };
+    if let Some(n) = store.get_mut(NationId(nid)) { n.war_exhaustion = value; }
+}
+
+// ===========================================================================
+// Phase 2: Diplomacy
+// ===========================================================================
+
+fn ensure_diplomacy(world: &mut GameWorld) {
+    if world.get_resource::<DiplomaticRelations>().is_none() {
+        let nc = world.get_resource::<WorldBounds>().map(|b| b.nation_count).unwrap_or(0);
+        world.insert_resource(DiplomaticRelations::new(nc));
+        world.insert_resource(WarRegistry::new());
+        world.insert_resource(DiplomacyConfig::default());
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_diplomacy_get_opinion(engine: *mut TeleologyEngine, a: CNationId, b: CNationId) -> i16 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0 };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_diplomacy(world);
+    let Some(rel) = world.get_resource::<DiplomaticRelations>() else { return 0 };
+    let (Some(an), Some(bn)) = (NonZeroU32::new(a.raw), NonZeroU32::new(b.raw)) else { return 0 };
+    rel.get(NationId(an), NationId(bn)).opinion
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_diplomacy_get_trust(engine: *mut TeleologyEngine, a: CNationId, b: CNationId) -> i16 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0 };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_diplomacy(world);
+    let Some(rel) = world.get_resource::<DiplomaticRelations>() else { return 0 };
+    let (Some(an), Some(bn)) = (NonZeroU32::new(a.raw), NonZeroU32::new(b.raw)) else { return 0 };
+    rel.get(NationId(an), NationId(bn)).trust
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_diplomacy_modify_opinion(engine: *mut TeleologyEngine, a: CNationId, b: CNationId, delta: i16) {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_diplomacy(world);
+    let (Some(an), Some(bn)) = (NonZeroU32::new(a.raw), NonZeroU32::new(b.raw)) else { return };
+    let Some(mut rel) = world.get_resource_mut::<DiplomaticRelations>() else { return };
+    rel.modify_opinion(NationId(an), NationId(bn), delta);
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_diplomacy_modify_trust(engine: *mut TeleologyEngine, a: CNationId, b: CNationId, delta: i16) {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_diplomacy(world);
+    let (Some(an), Some(bn)) = (NonZeroU32::new(a.raw), NonZeroU32::new(b.raw)) else { return };
+    let Some(mut rel) = world.get_resource_mut::<DiplomaticRelations>() else { return };
+    rel.modify_trust(NationId(an), NationId(bn), delta);
+}
+
+/// Declare war. goal_type: 0=Conquest, 1=Subjugation, 2=Independence, 3=Custom.
+/// target_province is used for Conquest; target_nation for Subjugation.
+/// Returns WarId raw (0 on failure).
+#[no_mangle]
+pub extern "C" fn teleology_diplomacy_declare_war(
+    engine: *mut TeleologyEngine,
+    attacker: CNationId,
+    defender: CNationId,
+    goal_type: u32,
+    target_province: u32,
+) -> u32 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0 };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_diplomacy(world);
+    let (Some(att), Some(def)) = (NonZeroU32::new(attacker.raw), NonZeroU32::new(defender.raw)) else { return 0 };
+    let date = world.get_resource::<GameDate>().copied().unwrap_or(GameDate { day: 1, month: 1, year: 1 });
+    let war_goal = match goal_type {
+        0 => WarGoal::Conquest { target_provinces: if target_province > 0 { vec![target_province] } else { Vec::new() } },
+        1 => WarGoal::Subjugation { target: NationId(def) },
+        2 => WarGoal::Independence,
+        _ => WarGoal::Custom { id: goal_type, payload: Vec::new() },
+    };
+    let Some(mut reg) = world.get_resource_mut::<WarRegistry>() else { return 0 };
+    reg.declare_war(NationId(att), NationId(def), war_goal, date).0.get()
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_diplomacy_end_war(engine: *mut TeleologyEngine, war_id: u32, truce_days: i64) {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_diplomacy(world);
+    let Some(wid) = NonZeroU32::new(war_id) else { return };
+    let date = world.get_resource::<GameDate>().copied().unwrap_or(GameDate { day: 1, month: 1, year: 1 });
+    let Some(mut reg) = world.get_resource_mut::<WarRegistry>() else { return };
+    reg.end_war(WarId(wid), truce_days, date);
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_diplomacy_are_at_war(engine: *mut TeleologyEngine, a: CNationId, b: CNationId) -> u8 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0 };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_diplomacy(world);
+    let (Some(an), Some(bn)) = (NonZeroU32::new(a.raw), NonZeroU32::new(b.raw)) else { return 0 };
+    let Some(reg) = world.get_resource::<WarRegistry>() else { return 0 };
+    if reg.are_at_war(NationId(an), NationId(bn)) { 1 } else { 0 }
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_diplomacy_get_war_score(engine: *mut TeleologyEngine, war_id: u32) -> i16 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0 };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_diplomacy(world);
+    let Some(wid) = NonZeroU32::new(war_id) else { return 0 };
+    let Some(reg) = world.get_resource::<WarRegistry>() else { return 0 };
+    reg.get_war(WarId(wid)).map(|w| w.war_score).unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_diplomacy_set_war_score(engine: *mut TeleologyEngine, war_id: u32, score: i16) {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_diplomacy(world);
+    let Some(wid) = NonZeroU32::new(war_id) else { return };
+    let Some(mut reg) = world.get_resource_mut::<WarRegistry>() else { return };
+    if let Some(w) = reg.get_war_mut(WarId(wid)) { w.war_score = score.clamp(-100, 100); }
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_diplomacy_form_alliance(engine: *mut TeleologyEngine, a: CNationId, b: CNationId) {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_diplomacy(world);
+    let (Some(an), Some(bn)) = (NonZeroU32::new(a.raw), NonZeroU32::new(b.raw)) else { return };
+    let date = world.get_resource::<GameDate>().copied().unwrap_or(GameDate { day: 1, month: 1, year: 1 });
+    let Some(mut reg) = world.get_resource_mut::<WarRegistry>() else { return };
+    reg.form_alliance(NationId(an), NationId(bn), date);
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_diplomacy_break_alliance(engine: *mut TeleologyEngine, a: CNationId, b: CNationId) {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_diplomacy(world);
+    let (Some(an), Some(bn)) = (NonZeroU32::new(a.raw), NonZeroU32::new(b.raw)) else { return };
+    let Some(mut reg) = world.get_resource_mut::<WarRegistry>() else { return };
+    reg.break_alliance(NationId(an), NationId(bn));
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_diplomacy_are_allied(engine: *mut TeleologyEngine, a: CNationId, b: CNationId) -> u8 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0 };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_diplomacy(world);
+    let (Some(an), Some(bn)) = (NonZeroU32::new(a.raw), NonZeroU32::new(b.raw)) else { return 0 };
+    let Some(reg) = world.get_resource::<WarRegistry>() else { return 0 };
+    if reg.are_allied(NationId(an), NationId(bn)) { 1 } else { 0 }
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_diplomacy_has_truce(engine: *mut TeleologyEngine, a: CNationId, b: CNationId) -> u8 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0 };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_diplomacy(world);
+    let (Some(an), Some(bn)) = (NonZeroU32::new(a.raw), NonZeroU32::new(b.raw)) else { return 0 };
+    let Some(reg) = world.get_resource::<WarRegistry>() else { return 0 };
+    if reg.has_truce(NationId(an), NationId(bn)) { 1 } else { 0 }
+}
+
+// ===========================================================================
+// Phase 3: Economy
+// ===========================================================================
+
+fn ensure_economy(world: &mut GameWorld) {
+    if world.get_resource::<NationBudgets>().is_none() {
+        let bounds = world.get_resource::<WorldBounds>().cloned();
+        let (nc, pc) = bounds.map(|b| (b.nation_count as usize, b.province_count as usize)).unwrap_or((0, 0));
+        world.insert_resource(EconomyConfig::default());
+        world.insert_resource(NationBudgets::new(nc));
+        world.insert_resource(GoodsRegistry::new());
+        world.insert_resource(ProvinceEconomy::new(pc));
+        world.insert_resource(TradeNetwork::new());
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_economy_get_tax_income(engine: *mut TeleologyEngine, nation: CNationId) -> f64 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0.0 };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_economy(world);
+    let Some(nid) = NonZeroU32::new(nation.raw) else { return 0.0 };
+    world.get_resource::<NationBudgets>()
+        .and_then(|b| b.get(NationId(nid)))
+        .map(|e| e.tax_income)
+        .unwrap_or(0.0)
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_economy_get_production_income(engine: *mut TeleologyEngine, nation: CNationId) -> f64 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0.0 };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_economy(world);
+    let Some(nid) = NonZeroU32::new(nation.raw) else { return 0.0 };
+    world.get_resource::<NationBudgets>()
+        .and_then(|b| b.get(NationId(nid)))
+        .map(|e| e.production_income)
+        .unwrap_or(0.0)
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_economy_get_trade_income(engine: *mut TeleologyEngine, nation: CNationId) -> f64 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0.0 };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_economy(world);
+    let Some(nid) = NonZeroU32::new(nation.raw) else { return 0.0 };
+    world.get_resource::<NationBudgets>()
+        .and_then(|b| b.get(NationId(nid)))
+        .map(|e| e.trade_income)
+        .unwrap_or(0.0)
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_economy_get_total_income(engine: *mut TeleologyEngine, nation: CNationId) -> f64 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0.0 };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_economy(world);
+    let Some(nid) = NonZeroU32::new(nation.raw) else { return 0.0 };
+    world.get_resource::<NationBudgets>()
+        .and_then(|b| b.get(NationId(nid)))
+        .map(|e| e.total_income)
+        .unwrap_or(0.0)
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_economy_get_total_expenses(engine: *mut TeleologyEngine, nation: CNationId) -> f64 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0.0 };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_economy(world);
+    let Some(nid) = NonZeroU32::new(nation.raw) else { return 0.0 };
+    world.get_resource::<NationBudgets>()
+        .and_then(|b| b.get(NationId(nid)))
+        .map(|e| e.total_expenses)
+        .unwrap_or(0.0)
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_economy_get_balance(engine: *mut TeleologyEngine, nation: CNationId) -> f64 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0.0 };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_economy(world);
+    let Some(nid) = NonZeroU32::new(nation.raw) else { return 0.0 };
+    world.get_resource::<NationBudgets>()
+        .and_then(|b| b.get(NationId(nid)))
+        .map(|e| e.balance)
+        .unwrap_or(0.0)
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_economy_register_good(engine: *mut TeleologyEngine, name: *const std::ffi::c_char, base_price: f64) -> u32 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0 };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_economy(world);
+    let n = if name.is_null() { String::new() } else { unsafe { CStr::from_ptr(name) }.to_string_lossy().into_owned() };
+    let Some(mut reg) = world.get_resource_mut::<GoodsRegistry>() else { return 0 };
+    reg.register(n, base_price).raw()
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_economy_get_good_price(engine: *mut TeleologyEngine, good_id: u32) -> f64 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0.0 };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_economy(world);
+    let Some(gid) = NonZeroU32::new(good_id) else { return 0.0 };
+    let Some(reg) = world.get_resource::<GoodsRegistry>() else { return 0.0 };
+    reg.base_price(teleology_core::GoodTypeId(gid))
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_economy_get_province_good(engine: *mut TeleologyEngine, province: CProvinceId) -> u32 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0 };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_economy(world);
+    let Some(pid) = NonZeroU32::new(province.raw) else { return 0 };
+    let Some(econ) = world.get_resource::<ProvinceEconomy>() else { return 0 };
+    econ.produced_good.get(ProvinceId(pid).index())
+        .and_then(|o| *o)
+        .map(|g| g.raw())
+        .unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_economy_set_province_good(engine: *mut TeleologyEngine, province: CProvinceId, good_id: u32) {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_economy(world);
+    let Some(pid) = NonZeroU32::new(province.raw) else { return };
+    let Some(mut econ) = world.get_resource_mut::<ProvinceEconomy>() else { return };
+    let idx = ProvinceId(pid).index();
+    if let Some(slot) = econ.produced_good.get_mut(idx) {
+        *slot = NonZeroU32::new(good_id).map(teleology_core::GoodTypeId);
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_economy_get_province_trade_power(engine: *mut TeleologyEngine, province: CProvinceId) -> f64 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0.0 };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_economy(world);
+    let Some(pid) = NonZeroU32::new(province.raw) else { return 0.0 };
+    let Some(econ) = world.get_resource::<ProvinceEconomy>() else { return 0.0 };
+    econ.local_trade_power.get(ProvinceId(pid).index()).copied().unwrap_or(0.0)
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_economy_set_province_trade_power(engine: *mut TeleologyEngine, province: CProvinceId, value: f64) {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_economy(world);
+    let Some(pid) = NonZeroU32::new(province.raw) else { return };
+    let Some(mut econ) = world.get_resource_mut::<ProvinceEconomy>() else { return };
+    let idx = ProvinceId(pid).index();
+    if let Some(slot) = econ.local_trade_power.get_mut(idx) { *slot = value; }
+}
+
+// ===========================================================================
+// Phase 4: Population
+// ===========================================================================
+
+fn ensure_population(world: &mut GameWorld) {
+    if world.get_resource::<ProvincePops>().is_none() {
+        let pc = world.get_resource::<WorldBounds>().map(|b| b.province_count as usize).unwrap_or(0);
+        world.insert_resource(PopulationConfig::default());
+        world.insert_resource(ProvincePops::new(pc));
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_pop_total(engine: *mut TeleologyEngine, province: CProvinceId) -> u32 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0 };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_population(world);
+    let Some(pid) = NonZeroU32::new(province.raw) else { return 0 };
+    let Some(pops) = world.get_resource::<ProvincePops>() else { return 0 };
+    pops.total_pop(ProvinceId(pid))
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_pop_average_unrest(engine: *mut TeleologyEngine, province: CProvinceId) -> f32 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0.0 };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_population(world);
+    let Some(pid) = NonZeroU32::new(province.raw) else { return 0.0 };
+    let Some(pops) = world.get_resource::<ProvincePops>() else { return 0.0 };
+    pops.average_unrest(ProvinceId(pid))
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_pop_group_count(engine: *mut TeleologyEngine, province: CProvinceId) -> u32 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0 };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_population(world);
+    let Some(pid) = NonZeroU32::new(province.raw) else { return 0 };
+    let Some(pops) = world.get_resource::<ProvincePops>() else { return 0 };
+    pops.get(ProvinceId(pid)).len() as u32
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_pop_group_size(engine: *mut TeleologyEngine, province: CProvinceId, index: u32) -> u32 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0 };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_population(world);
+    let Some(pid) = NonZeroU32::new(province.raw) else { return 0 };
+    let Some(pops) = world.get_resource::<ProvincePops>() else { return 0 };
+    pops.get(ProvinceId(pid)).get(index as usize).map(|g| g.size).unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_pop_group_unrest(engine: *mut TeleologyEngine, province: CProvinceId, index: u32) -> f32 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0.0 };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_population(world);
+    let Some(pid) = NonZeroU32::new(province.raw) else { return 0.0 };
+    let Some(pops) = world.get_resource::<ProvincePops>() else { return 0.0 };
+    pops.get(ProvinceId(pid)).get(index as usize).map(|g| g.unrest).unwrap_or(0.0)
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_pop_group_culture(engine: *mut TeleologyEngine, province: CProvinceId, index: u32) -> u32 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0 };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_population(world);
+    let Some(pid) = NonZeroU32::new(province.raw) else { return 0 };
+    let Some(pops) = world.get_resource::<ProvincePops>() else { return 0 };
+    pops.get(ProvinceId(pid)).get(index as usize).map(|g| g.culture.raw()).unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_pop_group_religion(engine: *mut TeleologyEngine, province: CProvinceId, index: u32) -> u32 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0 };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_population(world);
+    let Some(pid) = NonZeroU32::new(province.raw) else { return 0 };
+    let Some(pops) = world.get_resource::<ProvincePops>() else { return 0 };
+    pops.get(ProvinceId(pid)).get(index as usize).map(|g| g.religion.raw()).unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_pop_add_group(engine: *mut TeleologyEngine, province: CProvinceId, culture: u32, religion: u32, size: u32) {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_population(world);
+    let Some(pid) = NonZeroU32::new(province.raw) else { return };
+    let Some(cult) = NonZeroU32::new(culture) else { return };
+    let Some(rel) = NonZeroU32::new(religion) else { return };
+    let Some(mut pops) = world.get_resource_mut::<ProvincePops>() else { return };
+    if let Some(groups) = pops.get_mut(ProvinceId(pid)) {
+        groups.push(teleology_core::PopGroup {
+            culture: TagId(cult),
+            religion: TagId(rel),
+            size,
+            unrest: 0.0,
+        });
+    }
+}
+
+/// Check for revolts. Writes up to `cap` revolting provinces to out arrays.
+/// Returns the number of revolts found.
+#[no_mangle]
+pub extern "C" fn teleology_pop_check_revolts(
+    engine: *mut TeleologyEngine,
+    out_provinces: *mut u32,
+    out_strengths: *mut u32,
+    cap: u32,
+) -> u32 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0 };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_population(world);
+    let pc = world.get_resource::<WorldBounds>().map(|b| b.province_count).unwrap_or(0);
+    let config = world.get_resource::<PopulationConfig>().cloned().unwrap_or_default();
+    let Some(pops) = world.get_resource::<ProvincePops>() else { return 0 };
+    let revolts = check_revolts(&config, pops, pc);
+    let n = (cap as usize).min(revolts.len());
+    for i in 0..n {
+        if !out_provinces.is_null() { unsafe { *out_provinces.add(i) = revolts[i].0.0.get(); } }
+        if !out_strengths.is_null() { unsafe { *out_strengths.add(i) = revolts[i].1; } }
+    }
+    revolts.len() as u32
+}
+
+// ===========================================================================
+// Phase 5: Modifiers
+// ===========================================================================
+
+fn ensure_modifiers(world: &mut GameWorld) {
+    if world.get_resource::<ProvinceModifiers>().is_none() {
+        let bounds = world.get_resource::<WorldBounds>().cloned();
+        let (nc, pc) = bounds.map(|b| (b.nation_count as usize, b.province_count as usize)).unwrap_or((0, 0));
+        world.insert_resource(ProvinceModifiers::new(pc));
+        world.insert_resource(NationModifiers::new(nc));
+    }
+}
+
+fn make_modifier_value(op: u32, value: f64) -> ModifierValue {
+    match op {
+        0 => ModifierValue::Additive(value),
+        1 => ModifierValue::Multiplicative(value),
+        2 => ModifierValue::Set(value),
+        _ => ModifierValue::Custom { op_id: op, value },
+    }
+}
+
+/// Add a modifier to a province. Returns ModifierId raw (0 on failure).
+#[no_mangle]
+pub extern "C" fn teleology_modifier_add_province(
+    engine: *mut TeleologyEngine,
+    province: CProvinceId,
+    type_id: u32,
+    op: u32,
+    value: f64,
+    source_id: u32,
+) -> u32 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0 };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_modifiers(world);
+    let Some(pid) = NonZeroU32::new(province.raw) else { return 0 };
+    let Some(tid) = NonZeroU32::new(type_id) else { return 0 };
+    let m = Modifier {
+        id: ModifierId(NonZeroU32::new(1).unwrap()), // will be reassigned by add()
+        ty: ModifierTypeId(tid),
+        value: make_modifier_value(op, value),
+        source_id,
+        expires_on: None,
+    };
+    let Some(mut mods) = world.get_resource_mut::<ProvinceModifiers>() else { return 0 };
+    mods.add(ProvinceId(pid), m).0.get()
+}
+
+/// Add a modifier to a nation. Returns ModifierId raw (0 on failure).
+#[no_mangle]
+pub extern "C" fn teleology_modifier_add_nation(
+    engine: *mut TeleologyEngine,
+    nation: CNationId,
+    type_id: u32,
+    op: u32,
+    value: f64,
+    source_id: u32,
+) -> u32 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0 };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_modifiers(world);
+    let Some(nid) = NonZeroU32::new(nation.raw) else { return 0 };
+    let Some(tid) = NonZeroU32::new(type_id) else { return 0 };
+    let m = Modifier {
+        id: ModifierId(NonZeroU32::new(1).unwrap()),
+        ty: ModifierTypeId(tid),
+        value: make_modifier_value(op, value),
+        source_id,
+        expires_on: None,
+    };
+    let Some(mut mods) = world.get_resource_mut::<NationModifiers>() else { return 0 };
+    mods.add(NationId(nid), m).0.get()
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_modifier_remove_province(engine: *mut TeleologyEngine, province: CProvinceId, modifier_id: u32) -> u8 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0 };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_modifiers(world);
+    let Some(pid) = NonZeroU32::new(province.raw) else { return 0 };
+    let Some(mid) = NonZeroU32::new(modifier_id) else { return 0 };
+    let Some(mut mods) = world.get_resource_mut::<ProvinceModifiers>() else { return 0 };
+    if mods.remove(ProvinceId(pid), ModifierId(mid)) { 1 } else { 0 }
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_modifier_remove_nation(engine: *mut TeleologyEngine, nation: CNationId, modifier_id: u32) -> u8 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0 };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_modifiers(world);
+    let Some(nid) = NonZeroU32::new(nation.raw) else { return 0 };
+    let Some(mid) = NonZeroU32::new(modifier_id) else { return 0 };
+    let Some(mut mods) = world.get_resource_mut::<NationModifiers>() else { return 0 };
+    if mods.remove(NationId(nid), ModifierId(mid)) { 1 } else { 0 }
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_modifier_list_province(engine: *mut TeleologyEngine, province: CProvinceId) -> u32 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0 };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_modifiers(world);
+    let Some(pid) = NonZeroU32::new(province.raw) else { return 0 };
+    let Some(mods) = world.get_resource::<ProvinceModifiers>() else { return 0 };
+    mods.list(ProvinceId(pid)).len() as u32
+}
+
+#[no_mangle]
+pub extern "C" fn teleology_modifier_list_nation(engine: *mut TeleologyEngine, nation: CNationId) -> u32 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0 };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_modifiers(world);
+    let Some(nid) = NonZeroU32::new(nation.raw) else { return 0 };
+    let Some(mods) = world.get_resource::<NationModifiers>() else { return 0 };
+    mods.list(NationId(nid)).len() as u32
+}
+
+/// Apply all modifiers of a given type for a scope to a base value.
+/// scope_kind: 0=Province, 1=Nation. scope_id: the raw province/nation id.
+#[no_mangle]
+pub extern "C" fn teleology_modifier_apply(engine: *mut TeleologyEngine, base: f64, type_id: u32, scope_kind: u32, scope_id: u32) -> f64 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return base };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_modifiers(world);
+    let Some(tid) = NonZeroU32::new(type_id) else { return base };
+    let Some(sid) = NonZeroU32::new(scope_id) else { return base };
+    let target_ty = ModifierTypeId(tid);
+    let now = world.get_resource::<GameDate>().copied();
+
+    match scope_kind {
+        0 => {
+            let Some(mods) = world.get_resource::<ProvinceModifiers>() else { return base };
+            let list: Vec<_> = mods.list(ProvinceId(sid)).iter().filter(|m| m.ty == target_ty).cloned().collect();
+            apply_modifiers(base, &list, None, now)
+        }
+        1 => {
+            let Some(mods) = world.get_resource::<NationModifiers>() else { return base };
+            let list: Vec<_> = mods.list(NationId(sid)).iter().filter(|m| m.ty == target_ty).cloned().collect();
+            apply_modifiers(base, &list, None, now)
+        }
+        _ => base,
+    }
+}
+
+// ===========================================================================
+// Phase 6: Characters
+// ===========================================================================
+
+static NEXT_PERSISTENT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Spawn a character. Returns persistent_id (0 on failure).
+#[no_mangle]
+pub extern "C" fn teleology_character_spawn(engine: *mut TeleologyEngine, name_id: u32, birth_year: i32) -> u64 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0 };
+    let world = unsafe { &mut *ctx.world.get() };
+    let pid = NEXT_PERSISTENT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let character = Character {
+        name_id,
+        persistent_id: pid,
+        birth_year: if birth_year != 0 { Some(birth_year) } else { None },
+        death_year: None,
+    };
+    spawn_character(world, character);
+    pid
+}
+
+/// Set a character's role. role: 0=Leader, 1=General, 2=Advisor, 3+=Custom.
+#[no_mangle]
+pub extern "C" fn teleology_character_set_role(
+    engine: *mut TeleologyEngine,
+    persistent_id: u64,
+    role: u32,
+    nation: CNationId,
+    army: u32,
+) {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return };
+    let world = unsafe { &mut *ctx.world.get() };
+    // Find entity by persistent_id.
+    let entity = {
+        let mut found = None;
+        for (e, c) in world.query::<(Entity, &Character)>().iter(world) {
+            if c.persistent_id == persistent_id { found = Some(e); break; }
+        }
+        found
+    };
+    let Some(entity) = entity else { return };
+    let nid_opt = NonZeroU32::new(nation.raw).map(NationId);
+    let char_role = match role {
+        0 => nid_opt.map(CharacterRole::Leader),
+        1 => nid_opt.map(|n| CharacterRole::General { nation: n, army_raw: army }),
+        2 => nid_opt.map(CharacterRole::Advisor),
+        _ => Some(CharacterRole::Custom(role)),
+    };
+    if let Some(r) = char_role {
+        world.entity_mut(entity).insert(r);
+    }
+}
+
+/// Get a character stat. stat: 0=military, 1=diplomacy, 2=administration.
+#[no_mangle]
+pub extern "C" fn teleology_character_get_stat(engine: *mut TeleologyEngine, persistent_id: u64, stat: u32) -> i16 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0 };
+    let world = unsafe { &mut *ctx.world.get() };
+    for (_e, c, s) in world.query::<(Entity, &Character, &CharacterStats)>().iter(world) {
+        if c.persistent_id == persistent_id {
+            return match stat {
+                0 => s.military,
+                1 => s.diplomacy,
+                2 => s.administration,
+                _ => 0,
+            };
+        }
+    }
+    0
+}
+
+/// Set a character stat. stat: 0=military, 1=diplomacy, 2=administration.
+#[no_mangle]
+pub extern "C" fn teleology_character_set_stat(engine: *mut TeleologyEngine, persistent_id: u64, stat: u32, value: i16) {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return };
+    let world = unsafe { &mut *ctx.world.get() };
+    for (_e, c, mut s) in world.query::<(Entity, &Character, &mut CharacterStats)>().iter_mut(world) {
+        if c.persistent_id == persistent_id {
+            match stat {
+                0 => s.military = value,
+                1 => s.diplomacy = value,
+                2 => s.administration = value,
+                _ => {}
+            }
+            return;
+        }
+    }
+}
+
+/// Get a custom stat value for a character. Returns 0 if not found.
+#[no_mangle]
+pub extern "C" fn teleology_character_get_custom_stat(engine: *mut TeleologyEngine, persistent_id: u64, stat_id: u32) -> i32 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0 };
+    let world = unsafe { &mut *ctx.world.get() };
+    for (_e, c, s) in world.query::<(Entity, &Character, &CharacterStats)>().iter(world) {
+        if c.persistent_id == persistent_id {
+            return s.custom.get(&stat_id).copied().unwrap_or(0);
+        }
+    }
+    0
+}
+
+/// Set a custom stat value for a character.
+#[no_mangle]
+pub extern "C" fn teleology_character_set_custom_stat(engine: *mut TeleologyEngine, persistent_id: u64, stat_id: u32, value: i32) {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return };
+    let world = unsafe { &mut *ctx.world.get() };
+    for (_e, c, mut s) in world.query::<(Entity, &Character, &mut CharacterStats)>().iter_mut(world) {
+        if c.persistent_id == persistent_id {
+            s.custom.insert(stat_id, value);
+            return;
+        }
+    }
+}
+
+/// Mark a character as dead.
+#[no_mangle]
+pub extern "C" fn teleology_character_kill(engine: *mut TeleologyEngine, persistent_id: u64, death_year: i32) {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return };
+    let world = unsafe { &mut *ctx.world.get() };
+    for (_e, mut c) in world.query::<(Entity, &mut Character)>().iter_mut(world) {
+        if c.persistent_id == persistent_id {
+            c.death_year = Some(death_year);
+            return;
+        }
+    }
+}
+
+// ===========================================================================
+// Phase 7: Combat (config + inspection)
+// ===========================================================================
+
+fn ensure_combat(world: &mut GameWorld) {
+    if world.get_resource::<CombatModel>().is_none() {
+        world.insert_resource(CombatModel::default());
+        world.insert_resource(CombatResultLog::new());
+        world.insert_resource(UnitTypeRegistry::new());
+    }
+}
+
+/// Set the active combat model. model: 0=StackBased, 1=OneUnitPerTile, 2=Deployment, 3=TacticalGrid.
+#[no_mangle]
+pub extern "C" fn teleology_combat_set_model(engine: *mut TeleologyEngine, model: u8) {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_combat(world);
+    let cm = match model {
+        0 => CombatModel::StackBased(Default::default()),
+        1 => CombatModel::OneUnitPerTile(Default::default()),
+        2 => CombatModel::Deployment(Default::default()),
+        3 => CombatModel::TacticalGrid(Default::default()),
+        _ => return,
+    };
+    world.insert_resource(cm);
+}
+
+/// Get the active combat model. Returns 0=Stack, 1=Tile, 2=Deploy, 3=Tactical, 255=none.
+#[no_mangle]
+pub extern "C" fn teleology_combat_get_model(engine: *mut TeleologyEngine) -> u8 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 255 };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_combat(world);
+    let Some(cm) = world.get_resource::<CombatModel>() else { return 255 };
+    match cm {
+        CombatModel::StackBased(_) => 0,
+        CombatModel::OneUnitPerTile(_) => 1,
+        CombatModel::Deployment(_) => 2,
+        CombatModel::TacticalGrid(_) => 3,
+    }
+}
+
+/// Register a unit type. category: 0=Infantry, 1=Cavalry, 2=Ranged, 3=Siege, 4=Naval, 5+=Custom.
+/// Returns UnitTypeId raw (0 on failure).
+#[no_mangle]
+pub extern "C" fn teleology_combat_register_unit_type(
+    engine: *mut TeleologyEngine,
+    name: *const std::ffi::c_char,
+    category: u32,
+    strength: u16,
+    morale: u16,
+    speed: u8,
+) -> u32 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0 };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_combat(world);
+    let n = if name.is_null() { String::new() } else { unsafe { CStr::from_ptr(name) }.to_string_lossy().into_owned() };
+    let cat = match category {
+        0 => UnitCategory::Infantry,
+        1 => UnitCategory::Cavalry,
+        2 => UnitCategory::Ranged,
+        3 => UnitCategory::Siege,
+        4 => UnitCategory::Naval,
+        c => UnitCategory::Custom(c),
+    };
+    let Some(mut reg) = world.get_resource_mut::<UnitTypeRegistry>() else { return 0 };
+    reg.register(n, cat, strength, morale, speed).raw()
+}
+
+/// Get the number of logged combat results.
+#[no_mangle]
+pub extern "C" fn teleology_combat_result_count(engine: *mut TeleologyEngine) -> u32 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0 };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_combat(world);
+    let Some(log) = world.get_resource::<CombatResultLog>() else { return 0 };
+    log.results.len() as u32
+}
+
+/// Get a combat result by index. Returns the location province raw (0 if invalid).
+/// Writes casualties and winner to out pointers.
+/// winner_out: 0=Attacker, 1=Defender, 2=Draw.
+#[no_mangle]
+pub extern "C" fn teleology_combat_result_get(
+    engine: *mut TeleologyEngine,
+    index: u32,
+    attacker_casualties_out: *mut u32,
+    defender_casualties_out: *mut u32,
+    winner_out: *mut u8,
+) -> u32 {
+    let ctx = match context_from_engine(engine) { Some(c) => c, None => return 0 };
+    let world = unsafe { &mut *ctx.world.get() };
+    ensure_combat(world);
+    let Some(log) = world.get_resource::<CombatResultLog>() else { return 0 };
+    let Some(r) = log.results.get(index as usize) else { return 0 };
+    if !attacker_casualties_out.is_null() { unsafe { *attacker_casualties_out = r.attacker_casualties; } }
+    if !defender_casualties_out.is_null() { unsafe { *defender_casualties_out = r.defender_casualties; } }
+    if !winner_out.is_null() {
+        unsafe { *winner_out = match r.winner { BattleSide::Attacker => 0, BattleSide::Defender => 1, BattleSide::Draw => 2 }; }
+    }
+    r.location.0.get()
 }
 
 #[cfg(test)]

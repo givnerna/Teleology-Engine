@@ -135,21 +135,204 @@ CNationId
   (e.g. unowned province).
 
 --------------------------------------------------------------------------------
-7. CONVENTIONS AND NOTES
+7. PROVINCE & NATION FIELDS
+--------------------------------------------------------------------------------
+
+  uint8_t  teleology_get_province_terrain(engine, province);
+  void     teleology_set_province_terrain(engine, province, terrain);
+    Terrain type: 0 = land, 1 = sea, 2+ = custom.
+
+  uint16_t teleology_get_province_development(engine, province, index);
+  void     teleology_set_province_development(engine, province, index, value);
+    Development: index 0=tax, 1=production, 2=manpower.
+
+  uint32_t teleology_get_province_population(engine, province);
+  void     teleology_set_province_population(engine, province, value);
+
+  CNationId teleology_get_province_occupation(engine, province);
+  void      teleology_set_province_occupation(engine, province, nation);
+    Wartime occupier. raw=0 means not occupied.
+
+  uint32_t teleology_get_nation_count(engine);
+
+  int64_t  teleology_get_nation_treasury(engine, nation);
+  void     teleology_set_nation_treasury(engine, nation, value);
+
+  int8_t   teleology_get_nation_stability(engine, nation);
+  void     teleology_set_nation_stability(engine, nation, value);
+    Typically -3 to +3.
+
+  int32_t  teleology_get_nation_prestige(engine, nation);
+  void     teleology_set_nation_prestige(engine, nation, value);
+
+  uint32_t teleology_get_nation_manpower(engine, nation);
+  void     teleology_set_nation_manpower(engine, nation, value);
+
+  float    teleology_get_nation_war_exhaustion(engine, nation);
+  void     teleology_set_nation_war_exhaustion(engine, nation, value);
+    Range: 0.0 (fresh) to 100.0 (exhausted).
+
+--------------------------------------------------------------------------------
+8. DIPLOMACY
+--------------------------------------------------------------------------------
+
+Relations (symmetric N×N matrix):
+
+  int16_t  teleology_diplomacy_get_opinion(engine, a, b);
+  int16_t  teleology_diplomacy_get_trust(engine, a, b);
+  void     teleology_diplomacy_modify_opinion(engine, a, b, delta);
+  void     teleology_diplomacy_modify_trust(engine, a, b, delta);
+    Opinion: -200 to +200.  Trust: -100 to +100.
+    Modify functions apply symmetrically (a→b and b→a).
+
+Wars:
+
+  uint32_t teleology_diplomacy_declare_war(engine, attacker, defender, goal_type, target_province);
+    goal_type: 0=Conquest, 1=Subjugation, 2=Independence, 3+=Custom.
+    target_province: province raw for Conquest goals (0 for others).
+    Returns WarId raw.
+
+  void     teleology_diplomacy_end_war(engine, war_id, truce_days);
+    Ends war, creates truces between all participants.
+
+  uint8_t  teleology_diplomacy_are_at_war(engine, a, b);
+  int16_t  teleology_diplomacy_get_war_score(engine, war_id);
+  void     teleology_diplomacy_set_war_score(engine, war_id, score);
+
+Alliances & truces:
+
+  void     teleology_diplomacy_form_alliance(engine, a, b);
+  void     teleology_diplomacy_break_alliance(engine, a, b);
+  uint8_t  teleology_diplomacy_are_allied(engine, a, b);
+  uint8_t  teleology_diplomacy_has_truce(engine, a, b);
+
+--------------------------------------------------------------------------------
+9. ECONOMY
+--------------------------------------------------------------------------------
+
+Budget queries (computed by simulation each secondary tick):
+
+  double   teleology_economy_get_tax_income(engine, nation);
+  double   teleology_economy_get_production_income(engine, nation);
+  double   teleology_economy_get_trade_income(engine, nation);
+  double   teleology_economy_get_total_income(engine, nation);
+  double   teleology_economy_get_total_expenses(engine, nation);
+  double   teleology_economy_get_balance(engine, nation);
+
+Goods:
+
+  uint32_t teleology_economy_register_good(engine, name, base_price);
+    Returns GoodTypeId raw. Goods are types of trade products (Wheat, Iron, etc.).
+
+  double   teleology_economy_get_good_price(engine, good_id);
+  uint32_t teleology_economy_get_province_good(engine, province);
+  void     teleology_economy_set_province_good(engine, province, good_id);
+  double   teleology_economy_get_province_trade_power(engine, province);
+  void     teleology_economy_set_province_trade_power(engine, province, value);
+
+--------------------------------------------------------------------------------
+10. POPULATION
+--------------------------------------------------------------------------------
+
+Each province has zero or more pop groups, each with a culture, religion, size,
+and unrest level. Culture/religion use TagId raws from the tag system.
+
+  uint32_t teleology_pop_total(engine, province);
+  float    teleology_pop_average_unrest(engine, province);
+  uint32_t teleology_pop_group_count(engine, province);
+  uint32_t teleology_pop_group_size(engine, province, index);
+  float    teleology_pop_group_unrest(engine, province, index);
+  uint32_t teleology_pop_group_culture(engine, province, index);
+  uint32_t teleology_pop_group_religion(engine, province, index);
+  void     teleology_pop_add_group(engine, province, culture, religion, size);
+
+  uint32_t teleology_pop_check_revolts(engine, out_provinces, out_strengths, cap);
+    Checks all provinces for revolt conditions. Writes revolting province IDs and
+    rebel army strengths to out arrays. Returns total revolt count (may exceed cap).
+
+--------------------------------------------------------------------------------
+11. MODIFIERS
+--------------------------------------------------------------------------------
+
+Stackable effects on provinces and nations (e.g. +10% tax, -2 stability).
+
+  uint32_t teleology_modifier_add_province(engine, province, type_id, op, value, source_id);
+  uint32_t teleology_modifier_add_nation(engine, nation, type_id, op, value, source_id);
+    op: 0=Additive, 1=Multiplicative, 2=Set, 3+=Custom.
+    Returns ModifierId raw. type_id and source_id are game-defined.
+
+  uint8_t  teleology_modifier_remove_province(engine, province, modifier_id);
+  uint8_t  teleology_modifier_remove_nation(engine, nation, modifier_id);
+  uint32_t teleology_modifier_list_province(engine, province);
+  uint32_t teleology_modifier_list_nation(engine, nation);
+
+  double   teleology_modifier_apply(engine, base, type_id, scope_kind, scope_id);
+    Apply all modifiers of a given type to a base value.
+    scope_kind: 0=Province, 1=Nation.
+
+--------------------------------------------------------------------------------
+12. CHARACTERS
+--------------------------------------------------------------------------------
+
+Characters are leaders, generals, advisors, or custom roles. Identified by
+persistent_id (unique across the game session).
+
+  uint64_t teleology_character_spawn(engine, name_id, birth_year);
+    Returns persistent_id. birth_year=0 for unset.
+
+  void     teleology_character_set_role(engine, persistent_id, role, nation, army);
+    role: 0=Leader, 1=General, 2=Advisor, 3+=Custom.
+    nation: the nation this character serves.
+    army: army raw id (for generals; 0 otherwise).
+
+  int16_t  teleology_character_get_stat(engine, persistent_id, stat);
+  void     teleology_character_set_stat(engine, persistent_id, stat, value);
+    stat: 0=military, 1=diplomacy, 2=administration.
+
+  int32_t  teleology_character_get_custom_stat(engine, persistent_id, stat_id);
+  void     teleology_character_set_custom_stat(engine, persistent_id, stat_id, value);
+    Custom stats are game-defined, keyed by stat_id.
+
+  void     teleology_character_kill(engine, persistent_id, death_year);
+
+--------------------------------------------------------------------------------
+13. COMBAT
+--------------------------------------------------------------------------------
+
+Combat model selection and unit type definitions. The engine handles battle
+resolution internally; scripts configure and inspect results.
+
+  void     teleology_combat_set_model(engine, model);
+  uint8_t  teleology_combat_get_model(engine);
+    model: 0=StackBased (Paradox), 1=OneUnitPerTile (Civ 5),
+           2=Deployment (Humankind), 3=TacticalGrid (Total War).
+
+  uint32_t teleology_combat_register_unit_type(engine, name, category, strength, morale, speed);
+    category: 0=Infantry, 1=Cavalry, 2=Ranged, 3=Siege, 4=Naval, 5+=Custom.
+    Returns UnitTypeId raw.
+
+  uint32_t teleology_combat_result_count(engine);
+  uint32_t teleology_combat_result_get(engine, index, attacker_casualties_out, defender_casualties_out, winner_out);
+    Returns location province raw. winner_out: 0=Attacker, 1=Defender, 2=Draw.
+
+--------------------------------------------------------------------------------
+14. CONVENTIONS AND NOTES
 --------------------------------------------------------------------------------
 
 - IDs are 1-based. Province 1 is the first province, nation 1 is the first nation.
 - province.raw == 0 or nation.raw == 0 is invalid for province ID; for nation
-  it means “no owner” when setting province owner.
+  it means "no owner" when setting province owner.
 - The engine advances the calendar (day/month/year) and then runs daily,
   then monthly (if new month), then yearly (if new year) systems, then calls
   your on_daily_tick (and on_monthly_tick / on_yearly_tick when applicable).
 - Keep callbacks short; avoid blocking or long work so the game stays responsive.
 - Scripting is not available on WebGL builds; this API is for native (Windows,
   macOS, Linux) only.
+- Optional modules (diplomacy, economy, population, modifiers, characters,
+  combat) are lazy-initialized on first use. No setup required.
 
 --------------------------------------------------------------------------------
-8. MINIMAL EXAMPLE
+15. MINIMAL EXAMPLE
 --------------------------------------------------------------------------------
 
   #include "teleology.h"

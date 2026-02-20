@@ -1,222 +1,226 @@
-# Runtime Game UI Toolkit — Implementation Plan
+# Expose Core Simulation Systems to C++ Scripts — Implementation Plan
 
 ## Problem
 
-Game devs using the Teleology Engine C++ scripting API have **zero tools for building in-game UI**. The only UI scripts can produce is the fixed-format pop-up event system (title + body + choice buttons). There's no way to:
+The Teleology Engine has fully implemented Rust subsystems for **diplomacy, economy, population, combat, characters, and modifiers**, but none of them are accessible from C++ scripts. Script developers can show UI and handle events, but can't actually interact with the game simulation — they can't declare wars, check treasury, modify population, add modifiers, or spawn characters.
 
-- Show a HUD (gold, date, nation name, military strength)
-- Create menus (main menu, pause, settings, diplomacy)
-- Display tooltips, resource bars, stat panels
-- Put arbitrary text or images on screen
-- Build any custom game interface
+## Approach
 
-## Architecture
+Follow the existing C API pattern: `#[unsafe(no_mangle)] pub extern "C" fn teleology_*` functions in `teleology-runtime/src/lib.rs`, with matching declarations in `cpp/include/teleology.h`. Each subsystem gets a lazy `ensure_*` initializer and a focused set of accessor/mutator functions.
 
-**Immediate-mode command buffer**: Scripts call `teleology_ui_*` functions during their tick callbacks. These push commands into a `UiCommandBuffer` resource. After the tick, the editor/runtime reads and renders them via egui. Buffer is cleared each frame.
-
-This matches egui's immediate-mode philosophy — scripts "declare" their UI each frame, just like egui code does.
-
-```
-Script (C++)                Engine (Rust)              Renderer (egui)
-─────────────              ──────────────             ────────────────
-on_daily_tick() {          UiCommandBuffer {          for cmd in buffer {
-  teleology_ui_window()      commands: Vec<UiCmd>       match cmd {
-  teleology_ui_label()     }                            BeginWindow => Window::new()
-  teleology_ui_button()                                 Label => ui.label()
-  teleology_ui_end()                                    Button => ui.button()
-}                                                     }
-```
+All changes touch **3 files**: `lib.rs` (runtime), `teleology.h` (C header), `teleology_ffi.h` (FFI types if new C structs needed).
 
 ---
 
-## 1. `UiCommandBuffer` Resource (teleology-core)
+## Phase 1: Province & Nation Extended Fields
 
-**File:** `crates/teleology-core/src/game_ui.rs` (new)
+Exposes the fields on `Province` and `Nation` that scripts currently can't read or write.
 
-```rust
-/// One UI command from a script.
-#[derive(Clone)]
-pub enum UiCommand {
-    // --- Containers ---
-    BeginWindow { title: String, x: f32, y: f32, w: f32, h: f32 },
-    EndWindow,
-    BeginHorizontal,
-    EndHorizontal,
-    BeginVertical,
-    EndVertical,
+### Province API
+| Function | Signature | Purpose |
+|---|---|---|
+| `teleology_get_province_terrain` | `(engine, province) -> u8` | Get terrain type (0=land, 1=sea) |
+| `teleology_set_province_terrain` | `(engine, province, terrain)` | Set terrain type |
+| `teleology_get_province_development` | `(engine, province, index) -> u16` | Get dev level (0=tax, 1=prod, 2=manpower) |
+| `teleology_set_province_development` | `(engine, province, index, value)` | Set dev level |
+| `teleology_get_province_population` | `(engine, province) -> u32` | Get raw population count |
+| `teleology_set_province_population` | `(engine, province, value)` | Set raw population count |
+| `teleology_get_province_occupation` | `(engine, province) -> CNationId` | Get occupier (0 = none) |
+| `teleology_set_province_occupation` | `(engine, province, nation)` | Set occupier |
 
-    // --- Widgets ---
-    Label { text: String, font_size: f32 },
-    Button { id: u32, text: String },
-    ProgressBar { fraction: f32, text: String, w: f32 },
-    Image { path: String, w: f32, h: f32 },
-    Separator,
-    Spacing { amount: f32 },
-
-    // --- Styling (applies to next widget) ---
-    SetColor { r: u8, g: u8, b: u8, a: u8 },
-    SetFontSize { size: f32 },
-}
-
-/// Frame command buffer + interaction results from previous frame.
-#[derive(Resource, Clone, Default)]
-pub struct UiCommandBuffer {
-    pub commands: Vec<UiCommand>,
-    /// Button IDs clicked last frame (scripts poll this).
-    pub clicked_buttons: Vec<u32>,
-}
-```
-
-The `clicked_buttons` field is key: when the renderer processes a `Button` command and egui reports it was clicked, the button's `id` is added to `clicked_buttons`. Next frame, scripts poll to check if their button was clicked.
+### Nation API
+| Function | Signature | Purpose |
+|---|---|---|
+| `teleology_get_nation_treasury` | `(engine, nation) -> i64` | Get gold |
+| `teleology_set_nation_treasury` | `(engine, nation, value)` | Set gold |
+| `teleology_get_nation_stability` | `(engine, nation) -> i8` | Get stability (-3 to +3) |
+| `teleology_set_nation_stability` | `(engine, nation, value)` | Set stability |
+| `teleology_get_nation_prestige` | `(engine, nation) -> i32` | Get prestige |
+| `teleology_set_nation_prestige` | `(engine, nation, value)` | Set prestige |
+| `teleology_get_nation_manpower` | `(engine, nation) -> u32` | Get manpower pool |
+| `teleology_set_nation_manpower` | `(engine, nation, value)` | Set manpower pool |
+| `teleology_get_nation_war_exhaustion` | `(engine, nation) -> f32` | Get war exhaustion (0–100) |
+| `teleology_set_nation_war_exhaustion` | `(engine, nation, value)` | Set war exhaustion |
 
 ---
 
-## 2. C API Functions (teleology-runtime + teleology-script-api)
+## Phase 2: Diplomacy
 
-New `#[no_mangle] extern "C"` functions in `teleology-runtime/src/lib.rs`:
+### Relations API
+| Function | Signature | Purpose |
+|---|---|---|
+| `teleology_diplomacy_get_opinion` | `(engine, a, b) -> i16` | Get opinion of a toward b |
+| `teleology_diplomacy_get_trust` | `(engine, a, b) -> i16` | Get trust between a and b |
+| `teleology_diplomacy_modify_opinion` | `(engine, a, b, delta)` | Modify opinion (symmetric) |
+| `teleology_diplomacy_modify_trust` | `(engine, a, b, delta)` | Modify trust (symmetric) |
 
-| C Function | Purpose |
-|---|---|
-| `teleology_ui_begin_window(engine, title, x, y, w, h)` | Open a positioned window |
-| `teleology_ui_end_window(engine)` | Close window |
-| `teleology_ui_begin_horizontal(engine)` | Start horizontal layout |
-| `teleology_ui_end_horizontal(engine)` | End horizontal layout |
-| `teleology_ui_begin_vertical(engine)` | Start vertical layout |
-| `teleology_ui_end_vertical(engine)` | End vertical layout |
-| `teleology_ui_label(engine, text)` | Text label |
-| `teleology_ui_label_sized(engine, text, font_size)` | Text label with custom size |
-| `teleology_ui_button(engine, id, text)` | Clickable button |
-| `teleology_ui_button_was_clicked(engine, id) -> bool` | Poll if button was clicked last frame |
-| `teleology_ui_progress_bar(engine, fraction, text, width)` | Progress/resource bar |
-| `teleology_ui_image(engine, path, w, h)` | Display an image |
-| `teleology_ui_separator(engine)` | Horizontal separator line |
-| `teleology_ui_spacing(engine, amount)` | Vertical spacing |
-| `teleology_ui_set_color(engine, r, g, b, a)` | Set color for next widget |
-| `teleology_ui_set_font_size(engine, size)` | Set font size for next widget |
+### War API
+| Function | Signature | Purpose |
+|---|---|---|
+| `teleology_diplomacy_declare_war` | `(engine, attacker, defender, goal_type, target_province) -> u32` | Declare war, returns WarId raw |
+| `teleology_diplomacy_end_war` | `(engine, war_id, truce_days)` | End war, create truce |
+| `teleology_diplomacy_are_at_war` | `(engine, a, b) -> u8` | Check if two nations are at war |
+| `teleology_diplomacy_get_war_score` | `(engine, war_id) -> i16` | Get war score (-100 to +100) |
+| `teleology_diplomacy_set_war_score` | `(engine, war_id, score)` | Set war score |
 
----
+### Alliance & Truce API
+| Function | Signature | Purpose |
+|---|---|---|
+| `teleology_diplomacy_form_alliance` | `(engine, a, b)` | Form alliance |
+| `teleology_diplomacy_break_alliance` | `(engine, a, b)` | Break alliance |
+| `teleology_diplomacy_are_allied` | `(engine, a, b) -> u8` | Check alliance |
+| `teleology_diplomacy_has_truce` | `(engine, a, b) -> u8` | Check truce |
 
-## 3. Renderer Integration (teleology-editor)
-
-In `EditorApp::update()`, after the tick and after rendering the map, read `UiCommandBuffer` and render via egui:
-
-```rust
-fn render_game_ui(&self, ctx: &egui::Context) {
-    let world = self.engine.world();
-    let Some(buffer) = world.get_resource::<UiCommandBuffer>() else { return };
-    let mut clicked = Vec::new();
-    // Walk commands, maintaining a stack of open containers
-    // BeginWindow -> egui::Window::new().fixed_pos().fixed_size().show()
-    // Label -> ui.label()
-    // Button { id, text } -> if ui.button(text).clicked() { clicked.push(id) }
-    // etc.
-    // After rendering, write clicked_buttons back
-    drop(buffer);
-    if let Some(mut buf) = self.engine.world_mut().get_resource_mut::<UiCommandBuffer>() {
-        buf.clicked_buttons = clicked;
-        buf.commands.clear();
-    }
-}
-```
+**Lazy init:** `ensure_diplomacy(world)` inserts `DiplomaticRelations`, `WarRegistry`, and `DiplomacyConfig` with defaults.
 
 ---
 
-## 4. C++ Header Update
+## Phase 3: Economy
 
-Add all new functions to `cpp/include/teleology.h`:
+### Budget Query API
+| Function | Signature | Purpose |
+|---|---|---|
+| `teleology_economy_get_tax_income` | `(engine, nation) -> f64` | Nation's tax income |
+| `teleology_economy_get_production_income` | `(engine, nation) -> f64` | Production income |
+| `teleology_economy_get_trade_income` | `(engine, nation) -> f64` | Trade income |
+| `teleology_economy_get_total_income` | `(engine, nation) -> f64` | Total income |
+| `teleology_economy_get_total_expenses` | `(engine, nation) -> f64` | Total expenses |
+| `teleology_economy_get_balance` | `(engine, nation) -> f64` | Net balance |
 
-```c
-/* --- Game UI (immediate-mode; call during tick; rendered by engine each frame) --- */
-void teleology_ui_begin_window(TeleologyEngine* engine, const char* title, float x, float y, float w, float h);
-void teleology_ui_end_window(TeleologyEngine* engine);
-void teleology_ui_begin_horizontal(TeleologyEngine* engine);
-void teleology_ui_end_horizontal(TeleologyEngine* engine);
-void teleology_ui_begin_vertical(TeleologyEngine* engine);
-void teleology_ui_end_vertical(TeleologyEngine* engine);
-void teleology_ui_label(TeleologyEngine* engine, const char* text);
-void teleology_ui_label_sized(TeleologyEngine* engine, const char* text, float font_size);
-void teleology_ui_button(TeleologyEngine* engine, uint32_t id, const char* text);
-uint8_t teleology_ui_button_was_clicked(TeleologyEngine* engine, uint32_t id);
-void teleology_ui_progress_bar(TeleologyEngine* engine, float fraction, const char* text, float width);
-void teleology_ui_image(TeleologyEngine* engine, const char* path, float w, float h);
-void teleology_ui_separator(TeleologyEngine* engine);
-void teleology_ui_spacing(TeleologyEngine* engine, float amount);
-void teleology_ui_set_color(TeleologyEngine* engine, uint8_t r, uint8_t g, uint8_t b, uint8_t a);
-void teleology_ui_set_font_size(TeleologyEngine* engine, float size);
-```
+### Goods & Trade API
+| Function | Signature | Purpose |
+|---|---|---|
+| `teleology_economy_register_good` | `(engine, name, base_price) -> u32` | Register a trade good type |
+| `teleology_economy_get_good_price` | `(engine, good_id) -> f64` | Get base price |
+| `teleology_economy_get_province_good` | `(engine, province) -> u32` | Get province's produced good (0=none) |
+| `teleology_economy_set_province_good` | `(engine, province, good_id)` | Set province's produced good |
+| `teleology_economy_get_province_trade_power` | `(engine, province) -> f64` | Get local trade power |
+| `teleology_economy_set_province_trade_power` | `(engine, province, value)` | Set local trade power |
+
+**Lazy init:** `ensure_economy(world)` inserts `EconomyConfig`, `NationBudgets`, `GoodsRegistry`, `ProvinceEconomy`, `TradeNetwork` with defaults.
 
 ---
 
-## 5. What a Game Dev's Code Looks Like
+## Phase 4: Population
+
+| Function | Signature | Purpose |
+|---|---|---|
+| `teleology_pop_total` | `(engine, province) -> u32` | Total population in province |
+| `teleology_pop_average_unrest` | `(engine, province) -> f32` | Weighted average unrest |
+| `teleology_pop_group_count` | `(engine, province) -> u32` | Number of pop groups |
+| `teleology_pop_group_size` | `(engine, province, index) -> u32` | Size of pop group at index |
+| `teleology_pop_group_unrest` | `(engine, province, index) -> f32` | Unrest of pop group |
+| `teleology_pop_group_culture` | `(engine, province, index) -> u32` | Culture TagId of pop group |
+| `teleology_pop_group_religion` | `(engine, province, index) -> u32` | Religion TagId of pop group |
+| `teleology_pop_add_group` | `(engine, province, culture, religion, size)` | Add a new pop group |
+| `teleology_pop_check_revolts` | `(engine, out_provinces, out_strengths, cap) -> u32` | Check for revolts, returns count |
+
+**Lazy init:** `ensure_population(world)` inserts `PopulationConfig`, `ProvincePops` with defaults.
+
+---
+
+## Phase 5: Modifiers
+
+| Function | Signature | Purpose |
+|---|---|---|
+| `teleology_modifier_add_province` | `(engine, province, type_id, op, value, source_id) -> u32` | Add modifier to province |
+| `teleology_modifier_add_nation` | `(engine, nation, type_id, op, value, source_id) -> u32` | Add modifier to nation |
+| `teleology_modifier_remove_province` | `(engine, province, modifier_id) -> u8` | Remove province modifier |
+| `teleology_modifier_remove_nation` | `(engine, nation, modifier_id) -> u8` | Remove nation modifier |
+| `teleology_modifier_list_province` | `(engine, province) -> u32` | Count of province modifiers |
+| `teleology_modifier_list_nation` | `(engine, nation) -> u32` | Count of nation modifiers |
+| `teleology_modifier_apply` | `(engine, base, type_id, scope_kind, scope_id) -> f64` | Apply all matching modifiers to base value |
+
+`op` parameter: 0=Additive, 1=Multiplicative, 2=Set, 3=Custom.
+
+**Lazy init:** `ensure_modifiers(world)` inserts `ProvinceModifiers`, `NationModifiers` with defaults.
+
+---
+
+## Phase 6: Characters
+
+| Function | Signature | Purpose |
+|---|---|---|
+| `teleology_character_spawn` | `(engine, name_id, birth_year) -> u64` | Spawn character, returns persistent_id |
+| `teleology_character_set_role` | `(engine, persistent_id, role, nation, army)` | Assign role (0=Leader, 1=General, 2=Advisor, 3=Custom) |
+| `teleology_character_get_stat` | `(engine, persistent_id, stat) -> i16` | Get stat (0=military, 1=diplomacy, 2=admin) |
+| `teleology_character_set_stat` | `(engine, persistent_id, stat, value)` | Set stat |
+| `teleology_character_get_custom_stat` | `(engine, persistent_id, stat_id) -> i32` | Get custom stat |
+| `teleology_character_set_custom_stat` | `(engine, persistent_id, stat_id, value)` | Set custom stat |
+| `teleology_character_kill` | `(engine, persistent_id, death_year)` | Mark character as dead |
+
+---
+
+## Phase 7: Combat (Read-Only + Config)
+
+Combat resolution is complex and should stay in Rust. Scripts configure and inspect, but don't drive tick-by-tick battles.
+
+| Function | Signature | Purpose |
+|---|---|---|
+| `teleology_combat_set_model` | `(engine, model) -> void` | Set active combat model (0=Stack, 1=Tile, 2=Deployment, 3=Tactical) |
+| `teleology_combat_get_model` | `(engine) -> u8` | Get active combat model |
+| `teleology_combat_register_unit_type` | `(engine, name, category, strength, morale, speed) -> u32` | Register unit type |
+| `teleology_combat_result_count` | `(engine) -> u32` | Number of logged battles |
+| `teleology_combat_result_get` | `(engine, index, out_attacker_casualties, out_defender_casualties, out_winner) -> u32` | Get battle result details |
+
+---
+
+## Implementation Order
+
+| Step | Phase | Est. Functions | Key Risk |
+|------|-------|---------------|----------|
+| 1 | Province/Nation fields | 18 | None — straightforward field access |
+| 2 | Diplomacy | 14 | War declaration needs GameDate from world |
+| 3 | Economy | 12 | Budget values may need simulation tick to populate |
+| 4 | Population | 9 | Revolt check returns variable-length data |
+| 5 | Modifiers | 7 | ModifierValue enum mapping to C int |
+| 6 | Characters | 7 | Entity lookup by persistent_id needs index |
+| 7 | Combat | 5 | Read-only inspection keeps it simple |
+
+**Total: ~72 new C API functions across all phases.**
+
+---
+
+## Files Changed
+
+| File | Changes |
+|------|---------|
+| `crates/teleology-runtime/src/lib.rs` | All 72 `extern "C"` functions + `ensure_*` helpers |
+| `cpp/include/teleology.h` | All 72 C declarations |
+| `cpp/include/teleology_ffi.h` | New FFI types if needed (e.g., `CWarId`) |
+| `cpp/CPP_API_GUIDE.txt` | New sections documenting each subsystem |
+| `cpp/script/main.cpp` | Example usage of new APIs |
+
+---
+
+## Example: What Script Code Looks Like After
 
 ```cpp
-void on_daily_tick(TeleologyEngine* engine) {
-    CGameDate date = teleology_get_date(engine);
+void on_monthly_tick(TeleologyEngine* engine) {
+    CNationId me = { 1 };
+    CNationId rival = { 2 };
 
-    // Top HUD bar
-    teleology_ui_begin_window(engine, "HUD", 0, 0, 800, 40);
-      teleology_ui_begin_horizontal(engine);
-        teleology_ui_set_font_size(engine, 18.0f);
-        teleology_ui_label(engine, "Gold: 1,234");
-        teleology_ui_spacing(engine, 20);
-        teleology_ui_label(engine, "Army: 15,000");
-        teleology_ui_spacing(engine, 20);
-        char datebuf[32];
-        snprintf(datebuf, sizeof(datebuf), "%d-%02d-%02d", date.year, date.month, date.day);
-        teleology_ui_label(engine, datebuf);
-      teleology_ui_end_horizontal(engine);
-    teleology_ui_end_window(engine);
-
-    // Diplomacy button
-    teleology_ui_begin_window(engine, "Menu", 700, 50, 100, 40);
-      teleology_ui_button(engine, 1, "Diplomacy");
-    teleology_ui_end_window(engine);
-
-    if (teleology_ui_button_was_clicked(engine, 1)) {
-        show_diplomacy_panel = true;
+    // Check diplomacy
+    int16_t opinion = teleology_diplomacy_get_opinion(engine, me, rival);
+    if (opinion < -50 && !teleology_diplomacy_are_at_war(engine, me, rival)) {
+        teleology_diplomacy_declare_war(engine, me, rival, 0, 5); // Conquest, province 5
     }
 
-    if (show_diplomacy_panel) {
-        teleology_ui_begin_window(engine, "Diplomacy", 200, 100, 400, 300);
-          teleology_ui_label_sized(engine, "Relations", 20.0f);
-          teleology_ui_separator(engine);
-          teleology_ui_label(engine, "France: +50");
-          teleology_ui_label(engine, "England: -30");
-          teleology_ui_progress_bar(engine, 0.75f, "Trust: 75%", 300.0f);
-          teleology_ui_spacing(engine, 10);
-          teleology_ui_button(engine, 2, "Close");
-        teleology_ui_end_window(engine);
-
-        if (teleology_ui_button_was_clicked(engine, 2)) {
-            show_diplomacy_panel = false;
-        }
+    // Check treasury
+    int64_t gold = teleology_get_nation_treasury(engine, me);
+    if (gold > 500) {
+        teleology_set_nation_stability(engine, me,
+            teleology_get_nation_stability(engine, me) + 1);
     }
+
+    // Show population info in HUD
+    CProvinceId capital = { 1 };
+    uint32_t pop = teleology_pop_total(engine, capital);
+    float unrest = teleology_pop_average_unrest(engine, capital);
+    char buf[128];
+    snprintf(buf, sizeof(buf), "Capital Pop: %u  Unrest: %.1f%%", pop, unrest);
+    teleology_ui_begin_window(engine, "Pop Info", 10, 50, 300, 40);
+      teleology_ui_label(engine, buf);
+    teleology_ui_end_window(engine);
 }
 ```
-
----
-
-## 6. Implementation Order
-
-| Step | What | Files |
-|------|------|-------|
-| 1 | Create `game_ui.rs` with `UiCommand` enum + `UiCommandBuffer` resource | `crates/teleology-core/src/game_ui.rs` (new), edit `lib.rs` |
-| 2 | Add `UiCommandBuffer` initialization in runtime `EngineContext::new()` | Edit `crates/teleology-runtime/src/lib.rs` |
-| 3 | Implement all `teleology_ui_*` C API functions in runtime | Edit `crates/teleology-runtime/src/lib.rs` |
-| 4 | Add `EngineApi` trait methods for UI (with default no-ops) | Edit `crates/teleology-script-api/src/lib.rs` |
-| 5 | Add renderer in editor that reads `UiCommandBuffer` and renders via egui | Edit `crates/teleology-editor/src/lib.rs` |
-| 6 | Update C header with all new function declarations | Edit `cpp/include/teleology.h` |
-| 7 | Add tests for command buffer + round-trip | Edit `crates/teleology-runtime/src/lib.rs` (tests) |
-
----
-
-## Files Changed/Created
-
-| File | Action |
-|------|--------|
-| `crates/teleology-core/src/game_ui.rs` | **Create** — UiCommand, UiCommandBuffer |
-| `crates/teleology-core/src/lib.rs` | **Edit** — add `pub mod game_ui` + re-exports |
-| `crates/teleology-runtime/src/lib.rs` | **Edit** — init buffer, implement C API functions |
-| `crates/teleology-script-api/src/lib.rs` | **Edit** — add UI trait methods (optional) |
-| `crates/teleology-editor/src/lib.rs` | **Edit** — add `render_game_ui()` method |
-| `cpp/include/teleology.h` | **Edit** — declare new C functions |

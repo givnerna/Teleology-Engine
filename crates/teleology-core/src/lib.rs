@@ -60,7 +60,7 @@ pub use raycast::{
     screen_to_tile_square, screen_to_world, tile_distance_hex, tile_distance_square,
     tile_to_world_hex, tile_to_world_square, world_to_screen, RaycastHit, Viewport,
 };
-pub use population::{PopGroup, PopulationConfig, ProvincePops};
+pub use population::{check_revolts, PopGroup, PopulationConfig, ProvincePops};
 pub use progress_trees::{
     NationProgress, NodeId, ProgressNode, ProgressState, ProgressTreeDefinition, ProgressTrees,
     ProvinceProgress, ScopedProgress, TreeId, TreeProgressState,

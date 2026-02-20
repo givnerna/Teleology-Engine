@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 teleology-core = { path = "../teleology-core" }
 teleology-script-api = { path = "../teleology-script-api" }
+bevy_ecs = "0.14"
 
 # Native only: file watcher for hot reload (not on wasm)
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

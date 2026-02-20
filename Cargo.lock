@@ -4078,6 +4078,7 @@ dependencies = [
 name = "teleology-runtime"
 version = "0.1.0"
 dependencies = [
+ "bevy_ecs",
  "ffmpeg-next",
  "kira",
  "notify",

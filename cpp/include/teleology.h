@@ -352,6 +352,145 @@ uint8_t      teleology_screen_to_tile(TeleologyEngine* engine, float screen_x, f
 /* Tile distance (Chebyshev for square grids, axial for hex; 0 for irregular). */
 uint32_t     teleology_tile_distance(TeleologyEngine* engine, uint32_t x0, uint32_t y0, uint32_t x1, uint32_t y1);
 
+/* ==========================================================================
+ * Province & Nation extended fields
+ * ========================================================================== */
+
+/* Province fields */
+uint8_t      teleology_get_province_terrain(TeleologyEngine* engine, CProvinceId province);
+void         teleology_set_province_terrain(TeleologyEngine* engine, CProvinceId province, uint8_t terrain);
+/* index: 0=tax, 1=production, 2=manpower */
+uint16_t     teleology_get_province_development(TeleologyEngine* engine, CProvinceId province, uint32_t index);
+void         teleology_set_province_development(TeleologyEngine* engine, CProvinceId province, uint32_t index, uint16_t value);
+uint32_t     teleology_get_province_population(TeleologyEngine* engine, CProvinceId province);
+void         teleology_set_province_population(TeleologyEngine* engine, CProvinceId province, uint32_t value);
+/* Returns CNationId with raw=0 if not occupied. */
+CNationId    teleology_get_province_occupation(TeleologyEngine* engine, CProvinceId province);
+void         teleology_set_province_occupation(TeleologyEngine* engine, CProvinceId province, CNationId nation);
+
+/* Nation fields */
+uint32_t     teleology_get_nation_count(TeleologyEngine* engine);
+int64_t      teleology_get_nation_treasury(TeleologyEngine* engine, CNationId nation);
+void         teleology_set_nation_treasury(TeleologyEngine* engine, CNationId nation, int64_t value);
+int8_t       teleology_get_nation_stability(TeleologyEngine* engine, CNationId nation);
+void         teleology_set_nation_stability(TeleologyEngine* engine, CNationId nation, int8_t value);
+int32_t      teleology_get_nation_prestige(TeleologyEngine* engine, CNationId nation);
+void         teleology_set_nation_prestige(TeleologyEngine* engine, CNationId nation, int32_t value);
+uint32_t     teleology_get_nation_manpower(TeleologyEngine* engine, CNationId nation);
+void         teleology_set_nation_manpower(TeleologyEngine* engine, CNationId nation, uint32_t value);
+float        teleology_get_nation_war_exhaustion(TeleologyEngine* engine, CNationId nation);
+void         teleology_set_nation_war_exhaustion(TeleologyEngine* engine, CNationId nation, float value);
+
+/* ==========================================================================
+ * Diplomacy (relations, wars, alliances, truces)
+ * ========================================================================== */
+
+/* Relations */
+int16_t      teleology_diplomacy_get_opinion(TeleologyEngine* engine, CNationId a, CNationId b);
+int16_t      teleology_diplomacy_get_trust(TeleologyEngine* engine, CNationId a, CNationId b);
+void         teleology_diplomacy_modify_opinion(TeleologyEngine* engine, CNationId a, CNationId b, int16_t delta);
+void         teleology_diplomacy_modify_trust(TeleologyEngine* engine, CNationId a, CNationId b, int16_t delta);
+
+/* Wars: goal_type 0=Conquest, 1=Subjugation, 2=Independence, 3+=Custom.
+ * target_province used for Conquest goals. Returns WarId raw (0 on failure). */
+uint32_t     teleology_diplomacy_declare_war(TeleologyEngine* engine, CNationId attacker, CNationId defender, uint32_t goal_type, uint32_t target_province);
+void         teleology_diplomacy_end_war(TeleologyEngine* engine, uint32_t war_id, int64_t truce_days);
+uint8_t      teleology_diplomacy_are_at_war(TeleologyEngine* engine, CNationId a, CNationId b);
+int16_t      teleology_diplomacy_get_war_score(TeleologyEngine* engine, uint32_t war_id);
+void         teleology_diplomacy_set_war_score(TeleologyEngine* engine, uint32_t war_id, int16_t score);
+
+/* Alliances & truces */
+void         teleology_diplomacy_form_alliance(TeleologyEngine* engine, CNationId a, CNationId b);
+void         teleology_diplomacy_break_alliance(TeleologyEngine* engine, CNationId a, CNationId b);
+uint8_t      teleology_diplomacy_are_allied(TeleologyEngine* engine, CNationId a, CNationId b);
+uint8_t      teleology_diplomacy_has_truce(TeleologyEngine* engine, CNationId a, CNationId b);
+
+/* ==========================================================================
+ * Economy (budgets, goods, trade)
+ * ========================================================================== */
+
+/* Budget queries (values computed by simulation each secondary tick) */
+double       teleology_economy_get_tax_income(TeleologyEngine* engine, CNationId nation);
+double       teleology_economy_get_production_income(TeleologyEngine* engine, CNationId nation);
+double       teleology_economy_get_trade_income(TeleologyEngine* engine, CNationId nation);
+double       teleology_economy_get_total_income(TeleologyEngine* engine, CNationId nation);
+double       teleology_economy_get_total_expenses(TeleologyEngine* engine, CNationId nation);
+double       teleology_economy_get_balance(TeleologyEngine* engine, CNationId nation);
+
+/* Goods */
+uint32_t     teleology_economy_register_good(TeleologyEngine* engine, const char* name, double base_price);
+double       teleology_economy_get_good_price(TeleologyEngine* engine, uint32_t good_id);
+/* Province trade goods: 0 = no good. */
+uint32_t     teleology_economy_get_province_good(TeleologyEngine* engine, CProvinceId province);
+void         teleology_economy_set_province_good(TeleologyEngine* engine, CProvinceId province, uint32_t good_id);
+double       teleology_economy_get_province_trade_power(TeleologyEngine* engine, CProvinceId province);
+void         teleology_economy_set_province_trade_power(TeleologyEngine* engine, CProvinceId province, double value);
+
+/* ==========================================================================
+ * Population (pop groups, unrest, revolts)
+ * ========================================================================== */
+
+uint32_t     teleology_pop_total(TeleologyEngine* engine, CProvinceId province);
+float        teleology_pop_average_unrest(TeleologyEngine* engine, CProvinceId province);
+uint32_t     teleology_pop_group_count(TeleologyEngine* engine, CProvinceId province);
+uint32_t     teleology_pop_group_size(TeleologyEngine* engine, CProvinceId province, uint32_t index);
+float        teleology_pop_group_unrest(TeleologyEngine* engine, CProvinceId province, uint32_t index);
+/* Returns culture/religion TagId raw for the pop group. */
+uint32_t     teleology_pop_group_culture(TeleologyEngine* engine, CProvinceId province, uint32_t index);
+uint32_t     teleology_pop_group_religion(TeleologyEngine* engine, CProvinceId province, uint32_t index);
+/* Add a new pop group to a province. culture/religion are TagId raws. */
+void         teleology_pop_add_group(TeleologyEngine* engine, CProvinceId province, uint32_t culture, uint32_t religion, uint32_t size);
+/* Check for revolts. Writes up to cap results to out arrays. Returns total revolt count. */
+uint32_t     teleology_pop_check_revolts(TeleologyEngine* engine, uint32_t* out_provinces, uint32_t* out_strengths, uint32_t cap);
+
+/* ==========================================================================
+ * Modifiers (stackable province/nation effects)
+ * ========================================================================== */
+
+/* op: 0=Additive, 1=Multiplicative, 2=Set, 3+=Custom.
+ * Returns ModifierId raw (0 on failure). */
+uint32_t     teleology_modifier_add_province(TeleologyEngine* engine, CProvinceId province, uint32_t type_id, uint32_t op, double value, uint32_t source_id);
+uint32_t     teleology_modifier_add_nation(TeleologyEngine* engine, CNationId nation, uint32_t type_id, uint32_t op, double value, uint32_t source_id);
+uint8_t      teleology_modifier_remove_province(TeleologyEngine* engine, CProvinceId province, uint32_t modifier_id);
+uint8_t      teleology_modifier_remove_nation(TeleologyEngine* engine, CNationId nation, uint32_t modifier_id);
+/* Returns number of active modifiers. */
+uint32_t     teleology_modifier_list_province(TeleologyEngine* engine, CProvinceId province);
+uint32_t     teleology_modifier_list_nation(TeleologyEngine* engine, CNationId nation);
+/* Apply all modifiers of a given type_id for a scope to a base value.
+ * scope_kind: 0=Province, 1=Nation. Returns the modified value. */
+double       teleology_modifier_apply(TeleologyEngine* engine, double base, uint32_t type_id, uint32_t scope_kind, uint32_t scope_id);
+
+/* ==========================================================================
+ * Characters (leaders, generals, advisors)
+ * ========================================================================== */
+
+/* Spawn a character. Returns persistent_id (0 on failure). birth_year=0 for unset. */
+uint64_t     teleology_character_spawn(TeleologyEngine* engine, uint32_t name_id, int32_t birth_year);
+/* role: 0=Leader, 1=General, 2=Advisor, 3+=Custom. army raw id for generals. */
+void         teleology_character_set_role(TeleologyEngine* engine, uint64_t persistent_id, uint32_t role, CNationId nation, uint32_t army);
+/* stat: 0=military, 1=diplomacy, 2=administration. */
+int16_t      teleology_character_get_stat(TeleologyEngine* engine, uint64_t persistent_id, uint32_t stat);
+void         teleology_character_set_stat(TeleologyEngine* engine, uint64_t persistent_id, uint32_t stat, int16_t value);
+/* Custom stats keyed by game-defined id. */
+int32_t      teleology_character_get_custom_stat(TeleologyEngine* engine, uint64_t persistent_id, uint32_t stat_id);
+void         teleology_character_set_custom_stat(TeleologyEngine* engine, uint64_t persistent_id, uint32_t stat_id, int32_t value);
+void         teleology_character_kill(TeleologyEngine* engine, uint64_t persistent_id, int32_t death_year);
+
+/* ==========================================================================
+ * Combat (model selection, unit types, battle results)
+ * ========================================================================== */
+
+/* model: 0=StackBased, 1=OneUnitPerTile, 2=Deployment, 3=TacticalGrid. */
+void         teleology_combat_set_model(TeleologyEngine* engine, uint8_t model);
+uint8_t      teleology_combat_get_model(TeleologyEngine* engine);
+/* category: 0=Infantry, 1=Cavalry, 2=Ranged, 3=Siege, 4=Naval, 5+=Custom.
+ * Returns UnitTypeId raw (0 on failure). */
+uint32_t     teleology_combat_register_unit_type(TeleologyEngine* engine, const char* name, uint32_t category, uint16_t strength, uint16_t morale, uint8_t speed);
+uint32_t     teleology_combat_result_count(TeleologyEngine* engine);
+/* Returns location province raw (0 if invalid index).
+ * winner_out: 0=Attacker, 1=Defender, 2=Draw. */
+uint32_t     teleology_combat_result_get(TeleologyEngine* engine, uint32_t index, uint32_t* attacker_casualties_out, uint32_t* defender_casualties_out, uint8_t* winner_out);
+
 #ifdef __cplusplus
 }
 #endif
