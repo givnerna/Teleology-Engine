@@ -45,6 +45,14 @@ enum PendingContextAction {
     AddModifierNation(u32),
     FireEventProvince(u32),
     SpawnArmyProvince(u32),
+    // Event editor actions
+    DeleteEvent(u32),
+    DuplicateEvent(u32),
+    ClearEventConnections(u32),
+    // Progress tree editor actions
+    DeleteTree(u32),
+    DeleteNode(u32, u32),         // (tree_raw, node_raw)
+    ClearNodePrereqs(u32, u32),   // (tree_raw, node_raw)
 }
 
 /// Map editor paint mode: paint by nation (ownership) or edit province layout.
@@ -1011,6 +1019,82 @@ impl EditorApp {
             PendingContextAction::SpawnArmyProvince(id) => {
                 self.ensure_armies();
                 self.selected_province = Some(id);
+            }
+            PendingContextAction::DeleteEvent(raw) => {
+                if let Some(id) = NonZeroU32::new(raw).map(teleology_core::EventId) {
+                    let world = self.engine.world_mut();
+                    if let Some(mut reg) = world.get_resource_mut::<EventRegistry>() {
+                        reg.remove(id);
+                    }
+                }
+                if self.event_selected_raw == Some(raw) {
+                    self.event_selected_raw = None;
+                }
+                self.event_graph_pos.remove(&raw);
+            }
+            PendingContextAction::DuplicateEvent(raw) => {
+                if let Some(id) = NonZeroU32::new(raw).map(teleology_core::EventId) {
+                    let world = self.engine.world_mut();
+                    if let Some(mut reg) = world.get_resource_mut::<EventRegistry>() {
+                        if let Some(new_id) = reg.duplicate(id) {
+                            let new_raw = new_id.raw();
+                            // Place duplicate slightly offset from original
+                            let pos = self.event_graph_pos.get(&raw).copied()
+                                .unwrap_or(egui::Pos2::new(100.0, 100.0));
+                            self.event_graph_pos.insert(new_raw, pos + egui::Vec2::new(30.0, 30.0));
+                            self.event_selected_raw = Some(new_raw);
+                        }
+                    }
+                }
+            }
+            PendingContextAction::ClearEventConnections(raw) => {
+                let world = self.engine.world_mut();
+                if let Some(mut reg) = world.get_resource_mut::<EventRegistry>() {
+                    if let Some(def) = reg.events.get_mut(&raw) {
+                        for ch in &mut def.choices {
+                            ch.next_event = None;
+                        }
+                    }
+                }
+            }
+            PendingContextAction::DeleteTree(raw) => {
+                if let Some(id) = NonZeroU32::new(raw).map(teleology_core::TreeId) {
+                    let world = self.engine.world_mut();
+                    if let Some(mut trees) = world.get_resource_mut::<ProgressTrees>() {
+                        trees.remove_tree(id);
+                    }
+                }
+                if self.progress_selected_tree_raw == Some(raw) {
+                    self.progress_selected_tree_raw = None;
+                    self.progress_selected_node_raw = None;
+                }
+                // Clean up graph positions for nodes in this tree
+                self.progress_graph_pos.retain(|&(tr, _), _| tr != raw);
+            }
+            PendingContextAction::DeleteNode(tree_raw, node_raw) => {
+                if let (Some(tid), Some(nid)) = (
+                    NonZeroU32::new(tree_raw).map(teleology_core::TreeId),
+                    NonZeroU32::new(node_raw).map(teleology_core::NodeId),
+                ) {
+                    let world = self.engine.world_mut();
+                    if let Some(mut trees) = world.get_resource_mut::<ProgressTrees>() {
+                        trees.remove_node(tid, nid);
+                    }
+                }
+                if self.progress_selected_node_raw == Some(node_raw) {
+                    self.progress_selected_node_raw = None;
+                }
+                self.progress_graph_pos.remove(&(tree_raw, node_raw));
+            }
+            PendingContextAction::ClearNodePrereqs(tree_raw, node_raw) => {
+                let world = self.engine.world_mut();
+                if let Some(mut trees) = world.get_resource_mut::<ProgressTrees>() {
+                    if let Some(t) = trees.trees.iter_mut().find(|t| t.id.raw() == tree_raw) {
+                        if let Some(n) = t.nodes.iter_mut().find(|n| n.id.raw() == node_raw) {
+                            n.prerequisites.clear();
+                        }
+                    }
+                }
             }
         }
     }
@@ -2054,6 +2138,7 @@ impl EditorApp {
     }
 
     fn ui_events_editor(&mut self, ctx: &egui::Context) {
+        self.process_pending_context_action();
         if self.pending_create_event {
             self.ensure_events();
         }
@@ -2159,9 +2244,27 @@ impl EditorApp {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     for raw in ids {
                         let selected = self.event_selected_raw == Some(raw);
-                        if ui.selectable_label(selected, format!("Event {}", raw)).clicked() {
+                        let resp = ui.selectable_label(selected, format!("Event {}", raw));
+                        if resp.clicked() {
                             self.event_selected_raw = Some(raw);
                         }
+                        resp.context_menu(|ui| {
+                            ui.label(format!("Event {}", raw));
+                            ui.separator();
+                            if ui.button("Duplicate").clicked() {
+                                self.pending_context_action = Some(PendingContextAction::DuplicateEvent(raw));
+                                ui.close_menu();
+                            }
+                            if ui.button("Clear connections").clicked() {
+                                self.pending_context_action = Some(PendingContextAction::ClearEventConnections(raw));
+                                ui.close_menu();
+                            }
+                            ui.separator();
+                            if ui.button("Delete").clicked() {
+                                self.pending_context_action = Some(PendingContextAction::DeleteEvent(raw));
+                                ui.close_menu();
+                            }
+                        });
                     }
                 });
             });
@@ -2334,6 +2437,23 @@ impl EditorApp {
                         self.event_selected_raw = Some(raw);
                     }
                 }
+                resp.context_menu(|ui| {
+                    ui.label(format!("Event {}", raw));
+                    ui.separator();
+                    if ui.button("Duplicate").clicked() {
+                        self.pending_context_action = Some(PendingContextAction::DuplicateEvent(raw));
+                        ui.close_menu();
+                    }
+                    if ui.button("Clear connections").clicked() {
+                        self.pending_context_action = Some(PendingContextAction::ClearEventConnections(raw));
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui.button("Delete").clicked() {
+                        self.pending_context_action = Some(PendingContextAction::DeleteEvent(raw));
+                        ui.close_menu();
+                    }
+                });
 
                 let selected = self.event_selected_raw == Some(raw);
                 let fill = if selected {
@@ -2389,6 +2509,7 @@ impl EditorApp {
     }
 
     fn ui_progress_trees_editor(&mut self, ctx: &egui::Context) {
+        self.process_pending_context_action();
         if self.pending_create_tree {
             self.ensure_progress_trees();
         }
@@ -2444,10 +2565,19 @@ impl EditorApp {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     for (raw, name) in tree_list {
                         let selected = self.progress_selected_tree_raw == Some(raw);
-                        if ui.selectable_label(selected, format!("{} ({})", name, raw)).clicked() {
+                        let resp = ui.selectable_label(selected, format!("{} ({})", name, raw));
+                        if resp.clicked() {
                             self.progress_selected_tree_raw = Some(raw);
                             self.progress_selected_node_raw = None;
                         }
+                        resp.context_menu(|ui| {
+                            ui.label(format!("Tree: {}", name));
+                            ui.separator();
+                            if ui.button("Delete tree").clicked() {
+                                self.pending_context_action = Some(PendingContextAction::DeleteTree(raw));
+                                ui.close_menu();
+                            }
+                        });
                     }
                 });
             });
@@ -2626,6 +2756,19 @@ impl EditorApp {
                         self.progress_selected_node_raw = Some(raw);
                     }
                 }
+                resp.context_menu(|ui| {
+                    ui.label(format!("Node {}", raw));
+                    ui.separator();
+                    if ui.button("Clear prerequisites").clicked() {
+                        self.pending_context_action = Some(PendingContextAction::ClearNodePrereqs(tree_raw, raw));
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui.button("Delete node").clicked() {
+                        self.pending_context_action = Some(PendingContextAction::DeleteNode(tree_raw, raw));
+                        ui.close_menu();
+                    }
+                });
 
                 let selected = self.progress_selected_node_raw == Some(raw);
                 let fill = if selected { ui.visuals().selection.bg_fill } else { ui.visuals().widgets.inactive.bg_fill };

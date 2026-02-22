@@ -146,6 +146,25 @@ impl EventRegistry {
     pub fn get(&self, id: EventId) -> Option<&EventDefinition> {
         self.events.get(&id.raw())
     }
+
+    /// Remove an event definition by ID. Also clears any choice links pointing to it.
+    pub fn remove(&mut self, id: EventId) {
+        self.events.remove(&id.raw());
+        // Clear dangling references in other events' choices
+        for def in self.events.values_mut() {
+            for ch in &mut def.choices {
+                if ch.next_event == Some(id) {
+                    ch.next_event = None;
+                }
+            }
+        }
+    }
+
+    /// Duplicate an event, returning the new copy's ID.
+    pub fn duplicate(&mut self, id: EventId) -> Option<EventId> {
+        let def = self.events.get(&id.raw())?.clone();
+        Some(self.insert(def))
+    }
 }
 
 /// One queued event instance (runtime).

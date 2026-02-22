@@ -133,6 +133,24 @@ impl ProgressTrees {
         let idx = *self.node_index.get(&(tree.raw(), node.raw()))?;
         t.nodes.get(idx)
     }
+
+    /// Remove a tree by ID.
+    pub fn remove_tree(&mut self, tree: TreeId) {
+        self.trees.retain(|t| t.id != tree);
+        self.node_index.clear();
+    }
+
+    /// Remove a node from a tree. Also clears prerequisite references to it in sibling nodes.
+    pub fn remove_node(&mut self, tree: TreeId, node: NodeId) {
+        if let Some(t) = self.trees.iter_mut().find(|t| t.id == tree) {
+            t.nodes.retain(|n| n.id != node);
+            // Clear dangling prerequisite references
+            for n in &mut t.nodes {
+                n.prerequisites.retain(|p| *p != node);
+            }
+        }
+        self.node_index.clear();
+    }
 }
 
 /// Per-tree progress state (unlocked + current progress values).
