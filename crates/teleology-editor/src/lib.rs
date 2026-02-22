@@ -2289,7 +2289,7 @@ impl EditorApp {
                     let Some(to_pos) = self.event_graph_pos.get(&to_raw).copied() else { continue };
 
                     let from = rect.min + (from_pos.to_vec2() + self.event_graph_pan)
-                        + egui::Vec2::new(node_size.x, 30.0 + choice_idx as f32 * 18.0);
+                        + egui::Vec2::new(node_size.x, 56.0 + choice_idx as f32 * 18.0);
                     let to = rect.min + (to_pos.to_vec2() + self.event_graph_pan)
                         + egui::Vec2::new(0.0, node_size.y * 0.5);
                     // Skip edge if both endpoints are outside the visible area
@@ -2418,6 +2418,16 @@ impl EditorApp {
                     }
                 });
                 if self.pending_create_tree {
+                    // Ensure resources exist before creating tree
+                    if world.get_resource::<ProgressTrees>().is_none() {
+                        world.insert_resource(ProgressTrees::new());
+                        if let Some(b) = world.get_resource::<WorldBounds>().cloned() {
+                            world.insert_resource(ProgressState::new(
+                                b.nation_count as usize,
+                                b.province_count as usize,
+                            ));
+                        }
+                    }
                     if let Some(mut trees) = world.get_resource_mut::<ProgressTrees>() {
                         let id = trees.add_tree("New Tree");
                         self.progress_selected_tree_raw = Some(id.raw());
@@ -2780,7 +2790,7 @@ impl EditorApp {
 
                 let zoom = self.map_zoom;
 
-                let (_map_bounds, tile_hit, erase_hit, hover_info) = {
+                let (_map_bounds, tile_hit, click_only_hit, erase_hit, hover_info) = {
                     if let (Some(mk), Some(st)) = (map_kind, store) {
                         match mk {
                             MapKind::Square(map) => {
@@ -2991,12 +3001,17 @@ impl EditorApp {
                                     .then(|| response.interact_pointer_pos())
                                     .flatten()
                                     .and_then(|pos| to_tile(pos).map(|(rx, ry)| TileHit::Square(rx, ry)));
+                                // --- Click-only hit (for ownership painting, avoids painting multiple provinces on drag) ---
+                                let click_only = response.clicked()
+                                    .then(|| response.interact_pointer_pos())
+                                    .flatten()
+                                    .and_then(|pos| to_tile(pos).map(|(rx, ry)| TileHit::Square(rx, ry)));
                                 // --- Secondary click/drag → erase ---
                                 let secondary_hit = (response.secondary_clicked() || response.dragged_by(egui::PointerButton::Secondary))
                                     .then(|| response.interact_pointer_pos())
                                     .flatten()
                                     .and_then(|pos| to_tile(pos).map(|(rx, ry)| TileHit::Square(rx, ry)));
-                                (Some((map.width, map.height)), primary_hit, secondary_hit, hover)
+                                (Some((map.width, map.height)), primary_hit, click_only, secondary_hit, hover)
                             }
                             MapKind::Hex(hex) => {
                                 let base_cell = 14.0_f32;
@@ -3161,23 +3176,27 @@ impl EditorApp {
                                     .then(|| response.interact_pointer_pos())
                                     .flatten()
                                     .and_then(|pos| to_hex(pos).map(|(q, r)| TileHit::Hex(q, r)));
+                                let click_only = response.clicked()
+                                    .then(|| response.interact_pointer_pos())
+                                    .flatten()
+                                    .and_then(|pos| to_hex(pos).map(|(q, r)| TileHit::Hex(q, r)));
                                 let secondary_hit = (response.secondary_clicked() || response.dragged_by(egui::PointerButton::Secondary))
                                     .then(|| response.interact_pointer_pos())
                                     .flatten()
                                     .and_then(|pos| to_hex(pos).map(|(q, r)| TileHit::Hex(q, r)));
-                                (Some((w, h)), primary_hit, secondary_hit, hover)
+                                (Some((w, h)), primary_hit, click_only, secondary_hit, hover)
                             }
                             MapKind::Irregular(vec) => {
                                 ui.label(format!(
                                     "Irregular map: {} provinces. Use Assign (below) to set owners.",
                                     vec.polygons.len()
                                 ));
-                                (None, None, None, None)
+                                (None, None, None, None, None)
                             }
                         }
                     } else {
                         ui.label("No map. Create world with map_size(), map_hex(), or load a map.");
-                        (None, None, None, None)
+                        (None, None, None, None, None)
                     }
                 };
 
@@ -3198,7 +3217,9 @@ impl EditorApp {
                 }
 
                 // --- Apply primary paint (with brush radius) ---
-                if let Some(hit) = tile_hit {
+                // In ownership mode use click-only to avoid painting multiple provinces on drag
+                let effective_hit = if paint_ownership { click_only_hit } else { tile_hit };
+                if let Some(hit) = effective_hit {
                     if !self.stroke_undo_pushed {
                         self.push_undo();
                         self.stroke_undo_pushed = true;
