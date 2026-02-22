@@ -20,3 +20,54 @@ where
         }
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::archetypes::Province;
+    use crate::world::ScopeId;
+
+    #[test]
+    fn par_provinces_mut_updates_all() {
+        let bounds = WorldBounds {
+            province_count: 3,
+            nation_count: 1,
+        };
+        let mut store = ProvinceStore {
+            provinces: (1..=3)
+                .map(|i| Province::default_for(ProvinceId::from_raw(i)))
+                .collect(),
+        };
+
+        par_provinces_mut(&bounds, &mut store, |_id, p| {
+            p.population += 100;
+        });
+
+        for p in &store.provinces {
+            assert_eq!(p.population, 100);
+        }
+    }
+
+    #[test]
+    fn par_provinces_mut_receives_correct_ids() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let bounds = WorldBounds {
+            province_count: 4,
+            nation_count: 1,
+        };
+        let mut store = ProvinceStore {
+            provinces: (1..=4)
+                .map(|i| Province::default_for(ProvinceId::from_raw(i)))
+                .collect(),
+        };
+
+        let sum = AtomicU32::new(0);
+        par_provinces_mut(&bounds, &mut store, |id, _p| {
+            sum.fetch_add(id.0.get(), Ordering::Relaxed);
+        });
+
+        // Sum of 1+2+3+4 = 10
+        assert_eq!(sum.load(Ordering::Relaxed), 10);
+    }
+}

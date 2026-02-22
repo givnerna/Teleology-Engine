@@ -78,3 +78,58 @@ pub struct Unit {
     pub strength: u16,
     pub kind: u8, // 0 = army, 1 = fleet, etc.
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::world::ScopeId;
+
+    #[test]
+    fn province_default_for() {
+        let pid = ProvinceId::from_raw(5);
+        let p = Province::default_for(pid);
+        assert_eq!(p.id, pid);
+        assert!(p.owner.is_none());
+        assert!(p.occupation.is_none());
+        assert_eq!(p.terrain, TERRAIN_LAND);
+        assert_eq!(p.development, [1, 1, 1]);
+        assert_eq!(p.population, 0);
+    }
+
+    #[test]
+    fn province_is_land() {
+        let mut p = Province::default_for(ProvinceId::from_raw(1));
+        assert!(p.is_land());
+        p.terrain = TERRAIN_SEA;
+        assert!(!p.is_land());
+    }
+
+    #[test]
+    fn nation_default_for() {
+        let nid = NationId::from_raw(3);
+        let n = Nation::default_for(nid);
+        assert_eq!(n.id, nid);
+        assert_eq!(n.name_id, 0);
+        assert_eq!(n.prestige, 0);
+        assert_eq!(n.stability, 0);
+        assert_eq!(n.treasury, 0);
+        assert_eq!(n.manpower, 0);
+        assert_eq!(n.war_exhaustion, 0.0);
+    }
+
+    #[test]
+    fn province_ownership() {
+        let mut p = Province::default_for(ProvinceId::from_raw(1));
+        assert!(p.owner.is_none());
+        p.owner = Some(NationId::from_raw(2));
+        assert_eq!(p.owner.unwrap(), NationId::from_raw(2));
+    }
+
+    #[test]
+    fn province_occupation() {
+        let mut p = Province::default_for(ProvinceId::from_raw(1));
+        p.owner = Some(NationId::from_raw(1));
+        p.occupation = Some(NationId::from_raw(2));
+        assert_ne!(p.owner, p.occupation);
+    }
+}

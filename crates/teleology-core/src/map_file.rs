@@ -485,3 +485,90 @@ pub fn compute_adjacency(map_kind: &MapKind, province_count: u32) -> ProvinceAdj
         MapKind::Irregular(layout) => compute_adjacency_from_vector(layout, province_count),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy_ecs::world::World;
+    use crate::world::{MapLayout, ScopeId, WorldBuilder};
+
+    #[test]
+    fn map_file_roundtrip_bincode() {
+        let mut world = World::new();
+        WorldBuilder::new()
+            .provinces(4)
+            .nations(2)
+            .map_size(2, 2)
+            .build(&mut world);
+
+        let mf = MapFile::from_world(&mut world).unwrap();
+        assert_eq!(mf.version, 3);
+        assert_eq!(mf.provinces.len(), 4);
+        assert_eq!(mf.nations.len(), 2);
+
+        let mut buf = Vec::new();
+        mf.write(&mut buf).unwrap();
+        let mf2 = MapFile::read(&mut &buf[..]).unwrap();
+        assert_eq!(mf2.provinces.len(), 4);
+        assert_eq!(mf2.nations.len(), 2);
+    }
+
+    #[test]
+    fn map_file_roundtrip_json() {
+        let mut world = World::new();
+        WorldBuilder::new()
+            .provinces(3)
+            .nations(1)
+            .map_size(3, 1)
+            .build(&mut world);
+
+        let mf = MapFile::from_world(&mut world).unwrap();
+        let mut buf = Vec::new();
+        mf.write_json(&mut buf).unwrap();
+        let mf2 = MapFile::read_json(&mut &buf[..]).unwrap();
+        assert_eq!(mf2.provinces.len(), 3);
+    }
+
+    #[test]
+    fn map_file_apply_to_world() {
+        let mut world = World::new();
+        WorldBuilder::new()
+            .provinces(4)
+            .nations(2)
+            .map_size(2, 2)
+            .build(&mut world);
+
+        let mf = MapFile::from_world(&mut world).unwrap();
+
+        let mut world2 = World::new();
+        mf.apply_to_world(&mut world2);
+        let store = world2.get_resource::<ProvinceStore>().unwrap();
+        assert_eq!(store.provinces.len(), 4);
+        let nstore = world2.get_resource::<NationStore>().unwrap();
+        assert_eq!(nstore.nations.len(), 2);
+    }
+
+    #[test]
+    fn compute_adjacency_from_square_layout() {
+        // 2x2 grid: provinces 1,2,3,4
+        let layout = MapLayout {
+            width: 2,
+            height: 2,
+            tiles: vec![1, 2, 3, 4],
+        };
+        let adj = compute_adjacency_from_layout(&layout, 4);
+
+        // Province 1 (0,0) should be adjacent to 2 (1,0) and 3 (0,1)
+        let n1 = adj.get(ProvinceId::from_raw(1));
+        assert!(n1.contains(&2));
+        assert!(n1.contains(&3));
+        assert!(!n1.contains(&4));
+    }
+
+    #[test]
+    fn map_file_from_world_requires_resources() {
+        let mut w = World::new();
+        let result = MapFile::from_world(&mut w);
+        assert!(result.is_none());
+    }
+}

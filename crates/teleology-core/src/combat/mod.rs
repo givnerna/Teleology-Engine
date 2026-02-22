@@ -104,7 +104,7 @@ impl UnitTypeRegistry {
 // ---------------------------------------------------------------------------
 
 /// Which side won.
-#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BattleSide {
     Attacker,
     Defender,

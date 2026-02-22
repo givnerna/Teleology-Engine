@@ -76,7 +76,7 @@ pub struct FormationDef {
 // ---------------------------------------------------------------------------
 
 /// Facing direction on the tactical grid.
-#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Facing {
     North,
     South,
@@ -230,5 +230,122 @@ pub fn auto_resolve(battle: &TacticalBattle, _config: &TacticalGridConfig) -> su
         defender_casualties: (def_str as f64 * (1.0 - ratio) * 0.3) as u32,
         attacker_nations: Vec::new(),
         defender_nations: Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::world::ScopeId;
+    use crate::armies::ArmyId;
+
+    fn make_unit(army_raw: u32, hp: u16, morale: f64) -> TacticalUnit {
+        TacticalUnit {
+            army_id: ArmyId(std::num::NonZeroU32::new(army_raw).unwrap()),
+            stack_index: 0,
+            unit_type: None,
+            grid_x: 0,
+            grid_y: 0,
+            facing: Facing::North,
+            formation_index: 0,
+            hp,
+            morale,
+            fatigue: 0.0,
+            routing: false,
+        }
+    }
+
+    #[test]
+    fn tactical_grid_config_defaults() {
+        let config = TacticalGridConfig::default();
+        assert_eq!(config.grid_width, 40);
+        assert_eq!(config.grid_height, 30);
+        assert_eq!(config.formations.len(), 4);
+        assert!((config.flank_damage_mult - 1.5).abs() < f64::EPSILON);
+        assert!((config.rear_damage_mult - 2.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn facing_default() {
+        let f = Facing::default();
+        assert_eq!(f, Facing::North);
+    }
+
+    #[test]
+    fn tactical_unit_routing() {
+        let mut unit = make_unit(1, 100, 50.0);
+        assert!(!unit.routing);
+        unit.morale = -1.0;
+        if unit.morale <= 0.0 {
+            unit.routing = true;
+        }
+        assert!(unit.routing);
+    }
+
+    #[test]
+    fn auto_resolve_attacker_wins() {
+        let battle = TacticalBattle {
+            location: ProvinceId::from_raw(1),
+            grid_width: 40,
+            grid_height: 30,
+            attacker_units: vec![make_unit(1, 200, 100.0)],
+            defender_units: vec![make_unit(2, 50, 100.0)],
+            tick: 0,
+            attacker_casualties: 0,
+            defender_casualties: 0,
+        };
+        let config = TacticalGridConfig::default();
+        let result = auto_resolve(&battle, &config);
+        assert_eq!(result.winner, super::super::BattleSide::Attacker);
+    }
+
+    #[test]
+    fn auto_resolve_defender_wins() {
+        let battle = TacticalBattle {
+            location: ProvinceId::from_raw(1),
+            grid_width: 40,
+            grid_height: 30,
+            attacker_units: vec![make_unit(1, 50, 100.0)],
+            defender_units: vec![make_unit(2, 200, 100.0)],
+            tick: 0,
+            attacker_casualties: 0,
+            defender_casualties: 0,
+        };
+        let config = TacticalGridConfig::default();
+        let result = auto_resolve(&battle, &config);
+        assert_eq!(result.winner, super::super::BattleSide::Defender);
+    }
+
+    #[test]
+    fn auto_resolve_draw() {
+        let battle = TacticalBattle {
+            location: ProvinceId::from_raw(1),
+            grid_width: 40,
+            grid_height: 30,
+            attacker_units: vec![make_unit(1, 100, 100.0)],
+            defender_units: vec![make_unit(2, 100, 100.0)],
+            tick: 0,
+            attacker_casualties: 0,
+            defender_casualties: 0,
+        };
+        let config = TacticalGridConfig::default();
+        let result = auto_resolve(&battle, &config);
+        assert_eq!(result.winner, super::super::BattleSide::Draw);
+    }
+
+    #[test]
+    fn active_tactical_battles_default() {
+        let battles = ActiveTacticalBattles::default();
+        assert!(battles.battles.is_empty());
+    }
+
+    #[test]
+    fn formation_def_properties() {
+        let config = TacticalGridConfig::default();
+        let line = &config.formations[0];
+        assert_eq!(line.name, "Line");
+        let wedge = &config.formations[3];
+        assert_eq!(wedge.name, "Wedge");
+        assert!(wedge.attack_bonus > 0.0);
     }
 }

@@ -124,3 +124,96 @@ impl CharacterGenerator for DefaultCharacterGenerator {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gen_context_default() {
+        let ctx = GenContext::default();
+        assert!(ctx.nation.is_none());
+        assert_eq!(ctx.role_hint, 0);
+        assert_eq!(ctx.year, 0);
+        assert_eq!(ctx.seed, 0);
+    }
+
+    #[test]
+    fn character_gen_config_default() {
+        let config = CharacterGenConfig::default();
+        assert_eq!(config.military_min, 0);
+        assert_eq!(config.military_max, 6);
+        assert_eq!(config.diplomacy_min, 0);
+        assert_eq!(config.diplomacy_max, 6);
+    }
+
+    #[test]
+    fn default_generator_produces_character() {
+        let config = CharacterGenConfig::default();
+        let gen = DefaultCharacterGenerator::from_config(config);
+        let ctx = GenContext {
+            nation: None,
+            role_hint: 0,
+            year: 1444,
+            seed: 42,
+        };
+        let (c, stats) = gen.generate(ctx);
+        assert_eq!(c.persistent_id, 42);
+        assert_eq!(c.birth_year, Some(1414));
+        assert!(stats.military >= 0 && stats.military <= 6);
+        assert!(stats.diplomacy >= 0 && stats.diplomacy <= 6);
+        assert!(stats.administration >= 0 && stats.administration <= 6);
+    }
+
+    #[test]
+    fn default_generator_deterministic() {
+        let config = CharacterGenConfig::default();
+        let gen = DefaultCharacterGenerator::from_config(config);
+        let ctx = GenContext { nation: None, role_hint: 0, year: 1444, seed: 123 };
+        let (c1, s1) = gen.generate(ctx);
+        let (c2, s2) = gen.generate(ctx);
+        assert_eq!(c1.name_id, c2.name_id);
+        assert_eq!(s1.military, s2.military);
+        assert_eq!(s1.diplomacy, s2.diplomacy);
+        assert_eq!(s1.administration, s2.administration);
+    }
+
+    #[test]
+    fn default_generator_different_seeds() {
+        let config = CharacterGenConfig {
+            name_pool: vec![1, 2, 3, 4, 5],
+            military_min: 0,
+            military_max: 100,
+            diplomacy_min: 0,
+            diplomacy_max: 100,
+            administration_min: 0,
+            administration_max: 100,
+        };
+        let gen = DefaultCharacterGenerator::from_config(config);
+        let (_, s1) = gen.generate(GenContext { seed: 1, ..Default::default() });
+        let (_, s2) = gen.generate(GenContext { seed: 999, ..Default::default() });
+        // Different seeds should produce different stats (extremely high probability)
+        let same = s1.military == s2.military
+            && s1.diplomacy == s2.diplomacy
+            && s1.administration == s2.administration;
+        assert!(!same, "different seeds should produce different stats");
+    }
+
+    #[test]
+    fn default_generator_custom_ranges() {
+        let config = CharacterGenConfig {
+            name_pool: vec![10, 20],
+            military_min: 5,
+            military_max: 5,
+            diplomacy_min: 3,
+            diplomacy_max: 3,
+            administration_min: 1,
+            administration_max: 1,
+        };
+        let gen = DefaultCharacterGenerator::from_config(config);
+        let (_, stats) = gen.generate(GenContext { seed: 42, ..Default::default() });
+        assert_eq!(stats.military, 5);
+        assert_eq!(stats.diplomacy, 3);
+        assert_eq!(stats.administration, 1);
+    }
+}
+

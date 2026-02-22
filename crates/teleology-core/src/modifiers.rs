@@ -11,11 +11,11 @@ use std::num::NonZeroU32;
 use crate::world::{GameDate, NationId, ProvinceId, ScopeId};
 
 /// Stable id for a modifier instance.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ModifierId(pub NonZeroU32);
 
 /// Stable id for a modifier category/type (e.g. tax_income, stability, custom).
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ModifierTypeId(pub NonZeroU32);
 
 /// How a modifier changes a base value.
@@ -160,4 +160,116 @@ pub fn apply_modifiers(
         base = x;
     }
     base
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::world::ScopeId;
+
+    fn make_modifier(ty_raw: u32, value: ModifierValue) -> Modifier {
+        Modifier {
+            id: ModifierId(NonZeroU32::new(1).unwrap()),
+            ty: ModifierTypeId(NonZeroU32::new(ty_raw).unwrap()),
+            value,
+            source_id: 0,
+            expires_on: None,
+        }
+    }
+
+    #[test]
+    fn scoped_modifiers_add_and_list() {
+        let mut mods = ScopedModifiers::<ProvinceId>::new(4);
+        let pid = ProvinceId::from_raw(1);
+        let m = make_modifier(1, ModifierValue::Additive(5.0));
+        let mid = mods.add(pid, m);
+        assert_eq!(mods.list(pid).len(), 1);
+        assert_eq!(mods.list(pid)[0].id, mid);
+    }
+
+    #[test]
+    fn scoped_modifiers_remove() {
+        let mut mods = ScopedModifiers::<NationId>::new(3);
+        let nid = NationId::from_raw(1);
+        let m = make_modifier(1, ModifierValue::Additive(10.0));
+        let mid = mods.add(nid, m);
+        assert_eq!(mods.list(nid).len(), 1);
+        assert!(mods.remove(nid, mid));
+        assert_eq!(mods.list(nid).len(), 0);
+    }
+
+    #[test]
+    fn scoped_modifiers_remove_nonexistent() {
+        let mut mods = ScopedModifiers::<ProvinceId>::new(2);
+        let pid = ProvinceId::from_raw(1);
+        let fake_id = ModifierId(NonZeroU32::new(999).unwrap());
+        assert!(!mods.remove(pid, fake_id));
+    }
+
+    #[test]
+    fn apply_modifiers_additive() {
+        let mods = vec![make_modifier(1, ModifierValue::Additive(3.0))];
+        let result = apply_modifiers(10.0, &mods, None, None);
+        assert!((result - 13.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn apply_modifiers_multiplicative() {
+        let mods = vec![make_modifier(1, ModifierValue::Multiplicative(0.5))];
+        let result = apply_modifiers(10.0, &mods, None, None);
+        assert!((result - 15.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn apply_modifiers_set() {
+        let mods = vec![make_modifier(1, ModifierValue::Set(42.0))];
+        let result = apply_modifiers(10.0, &mods, None, None);
+        assert!((result - 42.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn apply_modifiers_combined() {
+        let mods = vec![
+            make_modifier(1, ModifierValue::Additive(5.0)),
+            make_modifier(2, ModifierValue::Multiplicative(0.1)),
+        ];
+        // base=10, +5=15, *1.1=16.5
+        let result = apply_modifiers(10.0, &mods, None, None);
+        assert!((result - 16.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn apply_modifiers_expired_filtered() {
+        let mut m = make_modifier(1, ModifierValue::Additive(100.0));
+        m.expires_on = Some(GameDate::new(1400, 1, 1));
+        let mods = vec![m];
+        let now = GameDate::new(1500, 1, 1);
+        let result = apply_modifiers(10.0, &mods, None, Some(now));
+        assert!((result - 10.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn apply_modifiers_not_expired() {
+        let mut m = make_modifier(1, ModifierValue::Additive(100.0));
+        m.expires_on = Some(GameDate::new(1600, 1, 1));
+        let mods = vec![m];
+        let now = GameDate::new(1500, 1, 1);
+        let result = apply_modifiers(10.0, &mods, None, Some(now));
+        assert!((result - 110.0).abs() < f64::EPSILON);
+    }
+
+    struct TestCalc;
+    impl ModifierCalculator for TestCalc {
+        fn apply_custom(&self, _op_id: u32, base: f64, value: f64) -> f64 {
+            base.powf(value)
+        }
+    }
+
+    #[test]
+    fn apply_modifiers_custom_calculator() {
+        let mods = vec![make_modifier(1, ModifierValue::Custom { op_id: 1, value: 2.0 })];
+        let calc = TestCalc;
+        let result = apply_modifiers(3.0, &mods, Some(&calc), None);
+        assert!((result - 9.0).abs() < f64::EPSILON);
+    }
 }

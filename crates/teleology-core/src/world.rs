@@ -40,7 +40,7 @@ impl ScopeId for ProvinceId {
 }
 
 /// Stable id for a nation/tag.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct NationId(pub NonZeroU32);
 
 impl NationId {

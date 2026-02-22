@@ -146,6 +146,25 @@ impl EventRegistry {
     pub fn get(&self, id: EventId) -> Option<&EventDefinition> {
         self.events.get(&id.raw())
     }
+
+    /// Remove an event definition by ID. Also clears any choice links pointing to it.
+    pub fn remove(&mut self, id: EventId) {
+        self.events.remove(&id.raw());
+        // Clear dangling references in other events' choices
+        for def in self.events.values_mut() {
+            for ch in &mut def.choices {
+                if ch.next_event == Some(id) {
+                    ch.next_event = None;
+                }
+            }
+        }
+    }
+
+    /// Duplicate an event, returning the new copy's ID.
+    pub fn duplicate(&mut self, id: EventId) -> Option<EventId> {
+        let def = self.events.get(&id.raw())?.clone();
+        Some(self.insert(def))
+    }
 }
 
 /// One queued event instance (runtime).
@@ -213,7 +232,7 @@ pub fn pull_next_event(world: &mut World) {
 // ---------------------------------------------------------------------------
 
 /// How the event pop-up should be positioned.
-#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum PopupAnchor {
     /// Centered in the window (default).
     Center,
@@ -568,4 +587,250 @@ pub fn register_builtin_templates(reg: &mut EventRegistry) -> [EventId; 5] {
         ids[i] = reg.insert(tmpl.create());
     }
     ids
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy_ecs::world::World;
+    use crate::world::ScopeId;
+
+    #[test]
+    fn event_scope_global() {
+        let s = EventScope::global();
+        assert!(s.is_global());
+        assert_eq!(s.scope_type, scope_types::GLOBAL);
+    }
+
+    #[test]
+    fn event_scope_nation() {
+        let nid = NationId::from_raw(5);
+        let s = EventScope::nation(nid);
+        assert!(!s.is_global());
+        assert_eq!(s.scope_type, scope_types::NATION);
+        assert_eq!(s.raw, 5);
+    }
+
+    #[test]
+    fn event_scope_province() {
+        let pid = ProvinceId::from_raw(3);
+        let s = EventScope::province(pid);
+        assert_eq!(s.scope_type, scope_types::PROVINCE);
+        assert_eq!(s.raw, 3);
+    }
+
+    #[test]
+    fn event_scope_character() {
+        let raw: u64 = 0x1_0000_0002;
+        let s = EventScope::character_raw(raw);
+        assert_eq!(s.scope_type, scope_types::CHARACTER);
+        assert_eq!(s.raw, 2);
+        assert_eq!(s.raw_hi, 1);
+    }
+
+    #[test]
+    fn event_scope_army() {
+        let s = EventScope::army_raw(42);
+        assert_eq!(s.scope_type, scope_types::ARMY);
+        assert_eq!(s.raw, 42);
+    }
+
+    #[test]
+    fn event_scope_custom() {
+        let s = EventScope::custom(1001, 7);
+        assert_eq!(s.scope_type, 1001);
+        assert_eq!(s.raw, 7);
+        assert!(!s.is_global());
+    }
+
+    #[test]
+    fn event_registry_insert_and_get() {
+        let mut reg = EventRegistry::new();
+        let def = EventDefinition {
+            id: EventId(NonZeroU32::new(1).unwrap()),
+            title: "Test".into(),
+            body: "Body".into(),
+            choices: vec![EventChoice {
+                text: "OK".into(),
+                next_event: None,
+                effects_payload: Vec::new(),
+            }],
+            image: String::new(),
+            image_w: 0.0,
+            image_h: 0.0,
+        };
+        let id = reg.insert(def);
+        let got = reg.get(id).unwrap();
+        assert_eq!(got.title, "Test");
+        assert_eq!(got.choices.len(), 1);
+    }
+
+    #[test]
+    fn event_registry_unique_ids() {
+        let mut reg = EventRegistry::new();
+        let tmpl = EventTemplate::Notification;
+        let id1 = reg.insert(tmpl.create());
+        let id2 = reg.insert(tmpl.create());
+        assert_ne!(id1.raw(), id2.raw());
+    }
+
+    #[test]
+    fn event_queue_push_pop() {
+        let mut q = EventQueue::default();
+        assert!(q.pop().is_none());
+
+        let inst = EventInstance {
+            event_id: EventId(NonZeroU32::new(1).unwrap()),
+            scope: EventScope::global(),
+            payload: vec![1, 2, 3],
+        };
+        q.push(inst);
+        let popped = q.pop().unwrap();
+        assert_eq!(popped.event_id.raw(), 1);
+        assert!(q.pop().is_none());
+    }
+
+    #[test]
+    fn event_queue_fifo_order() {
+        let mut q = EventQueue::default();
+        for i in 1..=3 {
+            q.push(EventInstance {
+                event_id: EventId(NonZeroU32::new(i).unwrap()),
+                scope: EventScope::global(),
+                payload: Vec::new(),
+            });
+        }
+        assert_eq!(q.pop().unwrap().event_id.raw(), 1);
+        assert_eq!(q.pop().unwrap().event_id.raw(), 2);
+        assert_eq!(q.pop().unwrap().event_id.raw(), 3);
+    }
+
+    #[test]
+    fn queue_event_helper() {
+        let mut world = World::new();
+        world.insert_resource(EventQueue::default());
+        let eid = EventId(NonZeroU32::new(1).unwrap());
+        queue_event(&mut world, eid, EventScope::global(), vec![42]);
+        let mut q = world.get_resource_mut::<EventQueue>().unwrap();
+        let inst = q.pop().unwrap();
+        assert_eq!(inst.payload, vec![42]);
+    }
+
+    #[test]
+    fn pull_next_event_into_active() {
+        let mut world = World::new();
+        world.insert_resource(EventQueue::default());
+        world.insert_resource(ActiveEvent::default());
+
+        let eid = EventId(NonZeroU32::new(1).unwrap());
+        queue_event(&mut world, eid, EventScope::global(), Vec::new());
+        pull_next_event(&mut world);
+
+        let active = world.get_resource::<ActiveEvent>().unwrap();
+        assert!(active.current.is_some());
+        assert_eq!(active.current.as_ref().unwrap().event_id.raw(), 1);
+    }
+
+    #[test]
+    fn register_builtin_templates_returns_five_ids() {
+        let mut reg = EventRegistry::new();
+        let ids = register_builtin_templates(&mut reg);
+        assert_eq!(ids.len(), 5);
+        for i in 0..5 {
+            assert!(reg.get(ids[i]).is_some());
+        }
+    }
+
+    #[test]
+    fn event_template_notification() {
+        let def = EventTemplate::Notification.create();
+        assert_eq!(def.choices.len(), 1);
+        assert_eq!(def.title, "Notification");
+    }
+
+    #[test]
+    fn event_template_binary_choice() {
+        let def = EventTemplate::BinaryChoice.create();
+        assert_eq!(def.choices.len(), 2);
+    }
+
+    #[test]
+    fn event_template_diplomatic_proposal() {
+        let def = EventTemplate::DiplomaticProposal.create();
+        assert_eq!(def.choices.len(), 3);
+    }
+
+    #[test]
+    fn keyword_registry_add_and_find() {
+        let mut reg = KeywordRegistry::default();
+        reg.add(KeywordEntry {
+            keyword: "Prestige".into(),
+            title: "Prestige".into(),
+            description: "Fame".into(),
+            icon: String::new(),
+            color: [0; 4],
+        });
+        let matches = reg.find_matches("Your Prestige has increased!");
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].2, 0);
+    }
+
+    #[test]
+    fn keyword_registry_case_insensitive() {
+        let mut reg = KeywordRegistry::default();
+        reg.add(KeywordEntry {
+            keyword: "gold".into(),
+            title: "Gold".into(),
+            description: "Currency".into(),
+            icon: String::new(),
+            color: [0; 4],
+        });
+        let matches = reg.find_matches("You gained GOLD and Gold!");
+        assert_eq!(matches.len(), 2);
+    }
+
+    #[test]
+    fn keyword_registry_remove() {
+        let mut reg = KeywordRegistry::default();
+        let idx = reg.add(KeywordEntry {
+            keyword: "test".into(),
+            title: "Test".into(),
+            description: "".into(),
+            icon: String::new(),
+            color: [0; 4],
+        });
+        assert!(reg.remove(idx));
+        assert!(reg.entries.is_empty());
+    }
+
+    #[test]
+    fn keyword_registry_clear() {
+        let mut reg = KeywordRegistry::default();
+        reg.add(KeywordEntry {
+            keyword: "a".into(), title: "A".into(), description: "".into(),
+            icon: String::new(), color: [0; 4],
+        });
+        reg.add(KeywordEntry {
+            keyword: "b".into(), title: "B".into(), description: "".into(),
+            icon: String::new(), color: [0; 4],
+        });
+        reg.clear();
+        assert!(reg.entries.is_empty());
+    }
+
+    #[test]
+    fn keyword_registry_load_from_json() {
+        let mut reg = KeywordRegistry::default();
+        let json = r#"[{"keyword":"Prestige","title":"Prestige","description":"Fame"}]"#;
+        let count = reg.load_from_json(json).unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(reg.entries[0].keyword, "Prestige");
+    }
+
+    #[test]
+    fn popup_style_default() {
+        let style = EventPopupStyle::default();
+        assert_eq!(style.anchor, PopupAnchor::Center);
+        assert!(style.modal);
+    }
 }

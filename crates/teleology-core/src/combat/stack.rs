@@ -82,7 +82,7 @@ impl Default for StackCombatConfig {
 // ---------------------------------------------------------------------------
 
 /// Phase of a stack-based battle.
-#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StackBattlePhase {
     Fire,
     Shock,
@@ -326,5 +326,72 @@ pub fn system_stack_org_recovery(
         if *status == ArmyStatus::Idle {
             army.organization = army.organization.saturating_add(config.org_recovery_per_tick);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stack_combat_config_defaults() {
+        let config = StackCombatConfig::default();
+        assert_eq!(config.combat_width, 27);
+        assert_eq!(config.dice_range, 10);
+        assert_eq!(config.fire_phase_days, 3);
+        assert_eq!(config.shock_phase_days, 3);
+        assert_eq!(config.pursuit_days, 2);
+        assert!((config.morale_base - 3.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn stack_battle_phase_transitions() {
+        let pid = ProvinceId::from_raw(1);
+        let aid_a = ArmyId(std::num::NonZeroU32::new(1).unwrap());
+        let aid_b = ArmyId(std::num::NonZeroU32::new(2).unwrap());
+
+        let mut battle = StackBattle {
+            location: pid,
+            attacker_armies: vec![aid_a],
+            defender_armies: vec![aid_b],
+            phase: StackBattlePhase::Fire,
+            phase_day: 0,
+            attacker_morale: 3.0,
+            defender_morale: 3.0,
+            attacker_casualties: 0,
+            defender_casualties: 0,
+        };
+
+        assert_eq!(battle.phase, StackBattlePhase::Fire);
+        battle.phase = StackBattlePhase::Shock;
+        assert_eq!(battle.phase, StackBattlePhase::Shock);
+        battle.phase = StackBattlePhase::Pursuit;
+        assert_eq!(battle.phase, StackBattlePhase::Pursuit);
+        battle.phase = StackBattlePhase::Resolved;
+        assert_eq!(battle.phase, StackBattlePhase::Resolved);
+    }
+
+    #[test]
+    fn active_stack_battles_default_empty() {
+        let battles = ActiveStackBattles::default();
+        assert!(battles.battles.is_empty());
+    }
+
+    #[test]
+    fn active_sieges_default_empty() {
+        let sieges = ActiveSieges::default();
+        assert!(sieges.sieges.is_empty());
+    }
+
+    #[test]
+    fn siege_state_progress() {
+        let mut siege = SiegeState {
+            province: ProvinceId::from_raw(5),
+            besieging_army: ArmyId(std::num::NonZeroU32::new(1).unwrap()),
+            progress: 0.0,
+            garrison: 1000,
+        };
+        siege.progress += 0.03;
+        assert!((siege.progress - 0.03).abs() < f64::EPSILON);
     }
 }
