@@ -20,12 +20,8 @@ impl EditorApp {
             .map(|mk| matches!(mk, MapKind::Irregular(_)))
             .unwrap_or(false);
 
-        // Left panel: nations when painting ownership (grid), provinces when editing or irregular
-        if paint_ownership && !is_irregular {
-            self.ui_map_editor_nations_panel(ctx);
-        } else {
-            self.ui_map_editor_provinces_panel(ctx);
-        }
+        // Left panel: unified hierarchy tree (Nation → Province ownership)
+        self.ui_hierarchy_tree_panel(ctx);
 
         // Right panel: nations for Edit provinces or Irregular (Assign)
         if !paint_ownership || is_irregular {
@@ -877,7 +873,8 @@ impl EditorApp {
             });
     }
 
-    fn ui_map_editor_nations_panel(&mut self, ctx: &egui::Context) {
+    /// Unity-style hierarchy tree: Nation nodes with Province children, plus Unowned group.
+    fn ui_hierarchy_tree_panel(&mut self, ctx: &egui::Context) {
         self.process_pending_context_action();
         egui::SidePanel::left("hierarchy")
             .default_width(260.0)
@@ -886,111 +883,237 @@ impl EditorApp {
             .show(ctx, |ui| {
                 panel_header(ui, "Hierarchy");
                 ui.add_space(4.0);
-                ui.strong("Nations");
-                ui.add_space(2.0);
-                ui.label(
-                    egui::RichText::new("Click one, then paint on the map to set ownership.")
-                        .small()
-                        .color(ui.visuals().weak_text_color()),
-                );
-                ui.add_space(8.0);
-                ui.separator();
-                ui.add_space(6.0);
-                let world = self.engine.world();
-                let (bounds, nations) = (
-                    world.get_resource::<WorldBounds>(),
-                    world.get_resource::<NationStore>(),
-                );
-                ui_nation_list(ui, bounds, nations, &mut self.selected_nation, &mut self.pending_context_action);
-            });
-    }
 
-    fn ui_map_editor_provinces_panel(&mut self, ctx: &egui::Context) {
-        self.process_pending_context_action();
-        egui::SidePanel::left("hierarchy")
-            .default_width(260.0)
-            .resizable(true)
-            .frame(panel_frame())
-            .show(ctx, |ui| {
-                panel_header(ui, "Hierarchy");
-                ui.add_space(4.0);
-                ui.strong("Provinces");
-                ui.add_space(2.0);
+                let paint_ownership = self.map_paint_mode == MapEditorPaintMode::PaintOwnership;
                 ui.label(
-                    egui::RichText::new("Click one to select it for painting on the map. Add province to create new ones.")
-                        .small()
-                        .color(ui.visuals().weak_text_color()),
+                    egui::RichText::new(if paint_ownership {
+                        "Select a nation to paint ownership. Expand nodes to see provinces."
+                    } else {
+                        "Select a province to paint on the map."
+                    })
+                    .small()
+                    .color(ui.visuals().weak_text_color()),
                 );
-                ui.add_space(6.0);
-                if ui.button("Add province").clicked() {
+
+                ui.add_space(4.0);
+                if ui.button("+ Add province").clicked() {
                     self.push_undo();
                     if let Some(new_id) = add_province_to_world(self.engine.world_mut()) {
                         self.selected_province = Some(new_id);
                     }
                 }
-                ui.add_space(6.0);
+
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    if ui.small_button("Expand all").clicked() {
+                        self.hierarchy_collapsed.clear();
+                    }
+                    if ui.small_button("Collapse all").clicked() {
+                        // Mark all as collapsed; we fill nation ids below.
+                        let world = self.engine.world();
+                        if let Some(b) = world.get_resource::<WorldBounds>() {
+                            self.hierarchy_collapsed.clear();
+                            for i in 0..=b.nation_count {
+                                self.hierarchy_collapsed.insert(i);
+                            }
+                        }
+                    }
+                });
+
+                ui.add_space(4.0);
                 ui.separator();
-                ui.add_space(6.0);
+                ui.add_space(4.0);
+
                 let world = self.engine.world();
-                let (bounds, provinces) = (
-                    world.get_resource::<WorldBounds>(),
-                    world.get_resource::<ProvinceStore>(),
-                );
-                if let (Some(bounds), Some(provinces)) = (bounds, provinces) {
+                let bounds = world.get_resource::<WorldBounds>();
+                let nations = world.get_resource::<NationStore>();
+                let provinces = world.get_resource::<ProvinceStore>();
+
+                if let (Some(bounds), Some(nations), Some(provinces)) = (bounds, nations, provinces) {
+                    let nation_count = bounds.nation_count as usize;
+                    let province_count = bounds.province_count as usize;
+
+                    // Build ownership map: nation_raw -> Vec<province_raw>
+                    let mut nation_provinces: Vec<Vec<u32>> = vec![Vec::new(); nation_count + 1];
+                    let mut unowned_provinces: Vec<u32> = Vec::new();
+
+                    for (i, p) in provinces.items.iter().enumerate().take(province_count) {
+                        let prov_raw = (i + 1) as u32;
+                        if let Some(owner) = p.owner {
+                            let n_raw = owner.0.get() as usize;
+                            if n_raw <= nation_count {
+                                nation_provinces[n_raw].push(prov_raw);
+                            } else {
+                                unowned_provinces.push(prov_raw);
+                            }
+                        } else {
+                            unowned_provinces.push(prov_raw);
+                        }
+                    }
+
                     egui::ScrollArea::vertical()
                         .auto_shrink([false; 2])
                         .show(ui, |ui| {
-                            for (i, p) in provinces.items.iter().enumerate().take(bounds.province_count as usize) {
-                                let id = (i + 1) as u32;
-                                let selected = self.selected_province == Some(id);
-                                let owner_raw = p.owner.map(|n| n.0.get()).unwrap_or(0);
-                                let label_response = ui.horizontal(|ui| {
+                            // --- Nation tree nodes ---
+                            for (i, n) in nations.items.iter().enumerate().take(nation_count) {
+                                let nation_raw = (i + 1) as u32;
+                                let children = &nation_provinces[nation_raw as usize];
+                                let is_open = !self.hierarchy_collapsed.contains(&nation_raw);
+                                let nation_selected = self.selected_nation == Some(nation_raw);
+
+                                let header_resp = ui.horizontal(|ui| {
+                                    // Collapse/expand triangle
+                                    let triangle = if children.is_empty() {
+                                        "  "
+                                    } else if is_open {
+                                        "\u{25BC}"
+                                    } else {
+                                        "\u{25B6}"
+                                    };
+                                    if !children.is_empty() {
+                                        if ui.add(
+                                            egui::Button::new(
+                                                egui::RichText::new(triangle).monospace().size(10.0),
+                                            )
+                                            .frame(false)
+                                            .min_size(egui::Vec2::new(16.0, 16.0)),
+                                        ).clicked() {
+                                            if is_open {
+                                                self.hierarchy_collapsed.insert(nation_raw);
+                                            } else {
+                                                self.hierarchy_collapsed.remove(&nation_raw);
+                                            }
+                                        }
+                                    } else {
+                                        ui.add_space(16.0);
+                                    }
+
+                                    // Color swatch
                                     let (rect, _) = ui.allocate_exact_size(
                                         egui::Vec2::new(12.0, 12.0),
                                         egui::Sense::hover(),
                                     );
-                                    ui.painter().rect_filled(
-                                        rect,
-                                        2.0,
-                                        nation_color(owner_raw),
-                                    );
-                                    ui.add_space(6.0);
-                                    ui.selectable_label(
-                                        selected,
-                                        format!("Province {}", id),
-                                    )
-                                    .on_hover_text(format!(
-                                        "Owner: {}  Dev: {}/{}/{}",
-                                        if owner_raw == 0 { "\u{2014}".to_string() } else { owner_raw.to_string() },
-                                        p.development[0],
-                                        p.development[1],
-                                        p.development[2],
-                                    ))
+                                    ui.painter().rect_filled(rect, 2.0, nation_color(nation_raw));
+                                    ui.add_space(4.0);
+
+                                    // Nation label
+                                    let label = if children.is_empty() {
+                                        format!("Nation {}", nation_raw)
+                                    } else {
+                                        format!("Nation {} ({})", nation_raw, children.len())
+                                    };
+                                    ui.selectable_label(nation_selected, label)
+                                        .on_hover_text(format!(
+                                            "Prestige: {}  Stability: {}  Treasury: {}",
+                                            n.prestige, n.stability, n.treasury,
+                                        ))
                                 }).inner;
-                                if label_response.clicked() {
-                                    self.selected_province = Some(id);
+
+                                if header_resp.clicked() {
+                                    self.selected_nation = Some(nation_raw);
                                 }
-                                label_response.context_menu(|ui| {
-                                    ui.label("Province actions (init on first use):");
+                                header_resp.context_menu(|ui| {
+                                    ui.label("Nation actions:");
                                     ui.separator();
                                     if ui.button("Set tag\u{2026}").clicked() {
-                                        self.pending_context_action = Some(PendingContextAction::SetTag(ScopeKind::Province, id));
+                                        self.pending_context_action = Some(PendingContextAction::SetTag(ScopeKind::Nation, nation_raw));
                                         ui.close_menu();
                                     }
                                     if ui.button("Add modifier\u{2026}").clicked() {
-                                        self.pending_context_action = Some(PendingContextAction::AddModifier(ScopeKind::Province, id));
-                                        ui.close_menu();
-                                    }
-                                    if ui.button("Fire event\u{2026}").clicked() {
-                                        self.pending_context_action = Some(PendingContextAction::FireEventProvince(id));
-                                        ui.close_menu();
-                                    }
-                                    if ui.button("Spawn army here").clicked() {
-                                        self.pending_context_action = Some(PendingContextAction::SpawnArmyProvince(id));
+                                        self.pending_context_action = Some(PendingContextAction::AddModifier(ScopeKind::Nation, nation_raw));
                                         ui.close_menu();
                                     }
                                 });
-                                ui.add_space(2.0);
+
+                                // Province children (indented)
+                                if is_open && !children.is_empty() {
+                                    ui.indent(format!("nation_{}_children", nation_raw), |ui| {
+                                        for &prov_raw in children {
+                                            let prov_selected = self.selected_province == Some(prov_raw);
+                                            let p = &provinces.items[(prov_raw - 1) as usize];
+
+                                            let prov_resp = ui.horizontal(|ui| {
+                                                let (rect, _) = ui.allocate_exact_size(
+                                                    egui::Vec2::new(10.0, 10.0),
+                                                    egui::Sense::hover(),
+                                                );
+                                                ui.painter().rect_filled(rect, 1.0, nation_color(nation_raw));
+                                                ui.add_space(4.0);
+                                                ui.selectable_label(prov_selected, format!("Province {}", prov_raw))
+                                                    .on_hover_text(format!(
+                                                        "Owner: N{}  Dev: {}/{}/{}  {}",
+                                                        nation_raw,
+                                                        p.development[0], p.development[1], p.development[2],
+                                                        if p.terrain == 0 { "Land" } else { "Sea" },
+                                                    ))
+                                            }).inner;
+
+                                            if prov_resp.clicked() {
+                                                self.selected_province = Some(prov_raw);
+                                            }
+                                            province_context_menu(&prov_resp, prov_raw, &mut self.pending_context_action);
+                                        }
+                                    });
+                                }
+                                ui.add_space(1.0);
+                            }
+
+                            // --- Unowned provinces group ---
+                            if !unowned_provinces.is_empty() {
+                                ui.add_space(4.0);
+                                let unowned_open = !self.hierarchy_collapsed.contains(&0);
+
+                                ui.horizontal(|ui| {
+                                    let triangle = if unowned_open { "\u{25BC}" } else { "\u{25B6}" };
+                                    if ui.add(
+                                        egui::Button::new(
+                                            egui::RichText::new(triangle).monospace().size(10.0),
+                                        )
+                                        .frame(false)
+                                        .min_size(egui::Vec2::new(16.0, 16.0)),
+                                    ).clicked() {
+                                        if unowned_open {
+                                            self.hierarchy_collapsed.insert(0);
+                                        } else {
+                                            self.hierarchy_collapsed.remove(&0);
+                                        }
+                                    }
+                                    ui.add_space(4.0);
+                                    ui.label(
+                                        egui::RichText::new(format!("Unowned ({})", unowned_provinces.len()))
+                                            .italics()
+                                            .color(ui.visuals().weak_text_color()),
+                                    );
+                                });
+
+                                if unowned_open {
+                                    ui.indent("unowned_children", |ui| {
+                                        for &prov_raw in &unowned_provinces {
+                                            let prov_selected = self.selected_province == Some(prov_raw);
+                                            let p = &provinces.items[(prov_raw - 1) as usize];
+
+                                            let prov_resp = ui.horizontal(|ui| {
+                                                let (rect, _) = ui.allocate_exact_size(
+                                                    egui::Vec2::new(10.0, 10.0),
+                                                    egui::Sense::hover(),
+                                                );
+                                                ui.painter().rect_filled(rect, 1.0, TILE_UNOWNED_PROVINCE_COLOR);
+                                                ui.add_space(4.0);
+                                                ui.selectable_label(prov_selected, format!("Province {}", prov_raw))
+                                                    .on_hover_text(format!(
+                                                        "Unowned  Dev: {}/{}/{}  {}",
+                                                        p.development[0], p.development[1], p.development[2],
+                                                        if p.terrain == 0 { "Land" } else { "Sea" },
+                                                    ))
+                                            }).inner;
+
+                                            if prov_resp.clicked() {
+                                                self.selected_province = Some(prov_raw);
+                                            }
+                                            province_context_menu(&prov_resp, prov_raw, &mut self.pending_context_action);
+                                        }
+                                    });
+                                }
                             }
                         });
                 } else {
@@ -1027,6 +1150,34 @@ impl EditorApp {
                 ui_nation_list(ui, bounds, nations, &mut self.selected_nation, &mut self.pending_context_action);
             });
     }
+}
+
+/// Right-click context menu for a province row (used in hierarchy tree and flat list).
+fn province_context_menu(
+    response: &egui::Response,
+    prov_raw: u32,
+    pending_action: &mut Option<PendingContextAction>,
+) {
+    response.context_menu(|ui| {
+        ui.label("Province actions:");
+        ui.separator();
+        if ui.button("Set tag\u{2026}").clicked() {
+            *pending_action = Some(PendingContextAction::SetTag(ScopeKind::Province, prov_raw));
+            ui.close_menu();
+        }
+        if ui.button("Add modifier\u{2026}").clicked() {
+            *pending_action = Some(PendingContextAction::AddModifier(ScopeKind::Province, prov_raw));
+            ui.close_menu();
+        }
+        if ui.button("Fire event\u{2026}").clicked() {
+            *pending_action = Some(PendingContextAction::FireEventProvince(prov_raw));
+            ui.close_menu();
+        }
+        if ui.button("Spawn army here").clicked() {
+            *pending_action = Some(PendingContextAction::SpawnArmyProvince(prov_raw));
+            ui.close_menu();
+        }
+    });
 }
 
 /// Shared nation list rendering for left and right panels.

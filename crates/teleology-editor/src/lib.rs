@@ -172,6 +172,10 @@ pub struct EditorApp {
     project_drop_status: String,
     /// Tick counter for status message fade-out.
     project_drop_status_ttl: u32,
+
+    // --- Hierarchy tree view (Unity-style nested location ownership) ---
+    /// Which nation nodes are collapsed in the hierarchy tree. 0 = "Unowned" group.
+    hierarchy_collapsed: HashSet<u32>,
 }
 
 impl EditorApp {
@@ -240,6 +244,8 @@ impl EditorApp {
             project_dragging: None,
             project_drop_status: String::new(),
             project_drop_status_ttl: 0,
+
+            hierarchy_collapsed: HashSet::new(),
         }
     }
 }
