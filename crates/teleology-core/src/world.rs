@@ -20,6 +20,9 @@ pub trait ScopeId: Clone + Copy + PartialEq + Eq + std::hash::Hash + Send + Sync
     fn from_raw(raw: u32) -> Self;
 }
 
+// NOTE: Province and Nation scopes are hand-written reference implementations.
+// For custom scopes, use `register_scope!` which generates all of this automatically.
+
 /// Stable id for a province (map slot). Dense index into province arrays.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ProvinceId(pub NonZeroU32);
@@ -847,25 +850,94 @@ pub fn add_province_to_world(world: &mut World) -> Option<u32> {
 /// Convenience type for the full game world (ECS + resources).
 pub type GameWorld = World;
 
-/// Macro to register a custom scope id type, generating `ScopeId` impl and `Resource` impls
-/// for `ScopedModifiers<T>`, `ScopedTags<T>`, and `ScopedProgress<T>`.
+/// Register a custom scope, generating all required trait and resource implementations.
 ///
-/// Usage:
+/// # Two-argument form (recommended for SoA-style scopes)
+///
+/// `register_scope!(FooId, Foo)` generates:
+/// - [`ScopeId`] impl for `FooId` (must be a newtype over `NonZeroU32`)
+/// - [`Resource`](bevy_ecs::prelude::Resource) impl for `ScopedStore<FooId, Foo>`
+/// - [`Resource`](bevy_ecs::prelude::Resource) impl for `ScopedModifiers<FooId>`
+/// - [`Resource`](bevy_ecs::prelude::Resource) impl for `ScopedTags<FooId>`
+/// - [`Resource`](bevy_ecs::prelude::Resource) impl for `ScopedProgress<FooId>`
+///
+/// # One-argument form (for ECS-entity scopes without a store)
+///
+/// `register_scope!(FooId)` generates everything above **except** the
+/// `ScopedStore` resource impl. Use this when entities are stored as Bevy ECS
+/// entities with components rather than in a dense `ScopedStore`.
+///
+/// # What you still need to write manually
+///
+/// Implement [`ScopeEntity`](crate::archetypes::ScopeEntity) for your entity
+/// type — each entity has custom fields, so the macro cannot generate this.
+///
+/// # Full example: defining a City scope
+///
 /// ```ignore
-/// // Define your id type (must be a newtype over NonZeroU32).
-/// #[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// use std::num::NonZeroU32;
+/// use serde::{Serialize, Deserialize};
+/// use teleology_core::{ScopeEntity, ScopeId};
+///
+/// // 1. Define your id type (newtype over NonZeroU32).
+/// #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 /// pub struct CityId(pub NonZeroU32);
 ///
-/// // Register it as a scope — generates ScopeId impl + Resource impls for all generic scope types.
-/// teleology_core::register_scope!(CityId);
+/// // 2. Define your entity struct.
+/// #[derive(Clone, Serialize, Deserialize)]
+/// pub struct City {
+///     pub id: CityId,
+///     pub name_id: u32,
+///     pub population: u32,
+/// }
+///
+/// // 3. Implement ScopeEntity (manual — your fields, your defaults).
+/// impl ScopeEntity for City {
+///     type Id = CityId;
+///     fn id(&self) -> CityId { self.id }
+///     fn default_for(id: CityId) -> Self {
+///         Self { id, name_id: 0, population: 0 }
+///     }
+/// }
+///
+/// // 4. One macro call generates everything.
+/// teleology_core::register_scope!(CityId, City);
 ///
 /// // Now you can use:
-/// //   ScopedModifiers<CityId> as a Bevy Resource
-/// //   ScopedTags<CityId> as a Bevy Resource
-/// //   ScopedProgress<CityId> as a Bevy Resource
+/// //   ScopedStore<CityId, City>::new(count)   — dense entity storage
+/// //   ScopedModifiers<CityId>::new(count)     — per-city modifiers
+/// //   ScopedTags<CityId>::default()           — per-city tags
+/// //   ScopedProgress<CityId>::new(count)      — per-city progress trees
+/// //
+/// // All of these are Bevy Resources — insert into a World:
+/// //   world.insert_resource(ScopedStore::<CityId, City>::new(city_count));
 /// ```
 #[macro_export]
 macro_rules! register_scope {
+    // Full form: ScopeId + ScopedStore + all subsystem Resources.
+    ($id_type:ty, $entity_type:ty) => {
+        impl $crate::world::ScopeId for $id_type {
+            #[inline]
+            fn index(self) -> usize {
+                (self.0.get() - 1) as usize
+            }
+            #[inline]
+            fn raw(self) -> u32 {
+                self.0.get()
+            }
+            #[inline]
+            fn from_raw(raw: u32) -> Self {
+                Self(::std::num::NonZeroU32::new(raw).unwrap())
+            }
+        }
+
+        impl $crate::Resource for $crate::world::ScopedStore<$id_type, $entity_type> {}
+        impl $crate::Resource for $crate::modifiers::ScopedModifiers<$id_type> {}
+        impl $crate::Resource for $crate::tags::ScopedTags<$id_type> {}
+        impl $crate::Resource for $crate::progress_trees::ScopedProgress<$id_type> {}
+    };
+    // Minimal form: ScopeId + subsystem Resources only (no ScopedStore).
+    // Use for scopes stored as ECS entities rather than in a dense store.
     ($id_type:ty) => {
         impl $crate::world::ScopeId for $id_type {
             #[inline]
@@ -882,15 +954,98 @@ macro_rules! register_scope {
             }
         }
 
-        impl bevy_ecs::prelude::Resource for $crate::modifiers::ScopedModifiers<$id_type> {}
-        impl bevy_ecs::prelude::Resource for $crate::tags::ScopedTags<$id_type> {}
-        impl bevy_ecs::prelude::Resource for $crate::progress_trees::ScopedProgress<$id_type> {}
+        impl $crate::Resource for $crate::modifiers::ScopedModifiers<$id_type> {}
+        impl $crate::Resource for $crate::tags::ScopedTags<$id_type> {}
+        impl $crate::Resource for $crate::progress_trees::ScopedProgress<$id_type> {}
     };
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::archetypes::ScopeEntity;
+
+    // --- Custom scope defined at module level (required for orphan rules). ---
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    pub struct CityId(pub NonZeroU32);
+
+    #[derive(Clone, Serialize, Deserialize)]
+    pub struct City {
+        pub id: CityId,
+        pub name_id: u32,
+        pub population: u32,
+    }
+
+    impl ScopeEntity for City {
+        type Id = CityId;
+        fn id(&self) -> CityId { self.id }
+        fn default_for(id: CityId) -> Self {
+            Self { id, name_id: 0, population: 0 }
+        }
+    }
+
+    // One macro call generates ScopeId + all Resource impls.
+    crate::register_scope!(CityId, City);
+
+    #[test]
+    fn custom_scope_via_macro() {
+        use crate::modifiers::{Modifier, ModifierId, ModifierTypeId, ModifierValue, ScopedModifiers};
+        use crate::tags::{ScopedTags, TagId, TagTypeId};
+        use crate::progress_trees::{ScopedProgress, TreeId, NodeId};
+
+        // ScopedStore: create, read, mutate.
+        let mut store = ScopedStore::<CityId, City>::new(3);
+        assert_eq!(store.len(), 3);
+        let c1 = CityId::from_raw(1);
+        assert_eq!(store.get(c1).unwrap().population, 0);
+        store.get_mut(c1).unwrap().population = 5000;
+        assert_eq!(store.get(c1).unwrap().population, 5000);
+
+        // Iterate.
+        let ids: Vec<u32> = store.iter().map(|(id, _)| id.raw()).collect();
+        assert_eq!(ids, vec![1, 2, 3]);
+
+        // ScopedModifiers: add, list, remove.
+        let mut mods = ScopedModifiers::<CityId>::new(3);
+        let m = Modifier {
+            id: ModifierId(NonZeroU32::new(1).unwrap()),
+            ty: ModifierTypeId(NonZeroU32::new(1).unwrap()),
+            value: ModifierValue::Additive(10.0),
+            source_id: 0,
+            expires_on: None,
+        };
+        let mid = mods.add(c1, m);
+        assert_eq!(mods.list(c1).len(), 1);
+        assert!(mods.remove(c1, mid));
+        assert_eq!(mods.list(c1).len(), 0);
+
+        // ScopedTags: set, get.
+        let mut tags = ScopedTags::<CityId>::default();
+        let ty = TagTypeId(NonZeroU32::new(1).unwrap());
+        let tag = TagId(NonZeroU32::new(42).unwrap());
+        tags.set(c1, ty, tag);
+        assert_eq!(tags.get(c1, ty), Some(tag));
+
+        // ScopedProgress: add progress, unlock.
+        let mut progress = ScopedProgress::<CityId>::new(3);
+        let tree = TreeId(NonZeroU32::new(1).unwrap());
+        let node = NodeId(NonZeroU32::new(1).unwrap());
+        progress.add_progress(c1, tree, node, 50.0);
+        assert!(!progress.is_unlocked(c1, tree, node));
+        progress.unlock(c1, tree, node);
+        assert!(progress.is_unlocked(c1, tree, node));
+
+        // All four types work as Bevy Resources.
+        let mut world = World::new();
+        world.insert_resource(store);
+        world.insert_resource(mods);
+        world.insert_resource(tags);
+        world.insert_resource(progress);
+        assert_eq!(
+            world.get_resource::<ScopedStore<CityId, City>>().unwrap().len(),
+            3
+        );
+    }
 
     #[test]
     fn province_id_index() {

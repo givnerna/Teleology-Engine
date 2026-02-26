@@ -7,6 +7,9 @@
 //! - **Script-friendly**: Hot data exposed via stable C API for C++ scripting.
 //! - **Data-driven**: All gameplay formulas exposed via config resources.
 
+// Re-export Resource so the `register_scope!` macro resolves correctly in downstream crates.
+pub use bevy_ecs::prelude::Resource;
+
 pub mod archetypes;
 pub mod batch;
 pub mod characters;
