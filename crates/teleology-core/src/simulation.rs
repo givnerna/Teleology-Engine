@@ -239,7 +239,7 @@ pub fn system_daily_province_tick(
     mut provinces: ResMut<ProvinceStore>,
 ) {
     let _ = bounds;
-    for (_id, prov) in provinces.provinces.iter_mut().enumerate() {
+    for (_id, prov) in provinces.items.iter_mut().enumerate() {
         let _ = prov;
     }
 }

@@ -214,7 +214,7 @@ pub fn system_economy_collect_taxes(
     mut budgets: ResMut<NationBudgets>,
 ) {
     let _ = bounds;
-    let nc = nations.nations.len();
+    let nc = nations.len();
 
     // Zero out income fields.
     for b in budgets.budgets.iter_mut().take(nc) {
@@ -225,7 +225,7 @@ pub fn system_economy_collect_taxes(
     }
 
     // Sum province contributions.
-    for prov in &provinces.provinces {
+    for prov in &provinces.items {
         if let Some(owner) = prov.owner {
             if owner.index() < nc {
                 let b = &mut budgets.budgets[owner.index()];
@@ -237,7 +237,7 @@ pub fn system_economy_collect_taxes(
     }
 
     // Compute total income and apply to treasury.
-    for (i, _nation) in nations.nations.iter_mut().enumerate() {
+    for (i, _nation) in nations.items.iter_mut().enumerate() {
         if i < budgets.budgets.len() {
             let b = &mut budgets.budgets[i];
             b.total_income = b.tax_income + b.production_income + b.trade_income;
@@ -283,7 +283,7 @@ pub fn system_economy_balance(
     mut nations: ResMut<NationStore>,
     mut budgets: ResMut<NationBudgets>,
 ) {
-    for (i, nation) in nations.nations.iter_mut().enumerate() {
+    for (i, nation) in nations.items.iter_mut().enumerate() {
         if i < budgets.budgets.len() {
             let b = &mut budgets.budgets[i];
             b.balance = b.total_income - b.total_expenses;
@@ -299,10 +299,10 @@ pub fn system_economy_manpower(
     provinces: Res<ProvinceStore>,
     mut nations: ResMut<NationStore>,
 ) {
-    let nc = nations.nations.len();
+    let nc = nations.len();
     let mut manpower_gain = vec![0.0_f64; nc];
 
-    for prov in &provinces.provinces {
+    for prov in &provinces.items {
         if let Some(owner) = prov.owner {
             if owner.index() < nc {
                 manpower_gain[owner.index()] +=
@@ -311,7 +311,7 @@ pub fn system_economy_manpower(
         }
     }
 
-    for (i, nation) in nations.nations.iter_mut().enumerate() {
+    for (i, nation) in nations.items.iter_mut().enumerate() {
         if i < nc {
             nation.manpower = nation.manpower.saturating_add(manpower_gain[i] as u32);
         }
@@ -337,13 +337,13 @@ mod tests {
         {
             let mut store = world.get_resource_mut::<ProvinceStore>().unwrap();
             // Nation 1 owns provinces 1,2 with dev [3,2,1]
-            store.provinces[0].owner = Some(NationId::from_raw(1));
-            store.provinces[0].development = [3, 2, 1];
-            store.provinces[1].owner = Some(NationId::from_raw(1));
-            store.provinces[1].development = [2, 3, 2];
+            store.items[0].owner = Some(NationId::from_raw(1));
+            store.items[0].development = [3, 2, 1];
+            store.items[1].owner = Some(NationId::from_raw(1));
+            store.items[1].development = [2, 3, 2];
             // Nation 2 owns province 3 with dev [5,1,3]
-            store.provinces[2].owner = Some(NationId::from_raw(2));
-            store.provinces[2].development = [5, 1, 3];
+            store.items[2].owner = Some(NationId::from_raw(2));
+            store.items[2].development = [5, 1, 3];
             // Province 4 unowned.
         }
         world
@@ -393,7 +393,7 @@ mod tests {
         schedule.run(&mut world);
 
         let nations = world.get_resource::<NationStore>().unwrap();
-        assert_eq!(nations.nations[0].treasury, 7); // 10 - 3 = 7
+        assert_eq!(nations.items[0].treasury, 7); // 10 - 3 = 7
     }
 
     #[test]
@@ -406,9 +406,9 @@ mod tests {
 
         let nations = world.get_resource::<NationStore>().unwrap();
         // Nation 1: manpower_dev = 1+2=3, gain = 3*250 = 750
-        assert_eq!(nations.nations[0].manpower, 750);
+        assert_eq!(nations.items[0].manpower, 750);
         // Nation 2: manpower_dev = 3, gain = 3*250 = 750
-        assert_eq!(nations.nations[1].manpower, 750);
+        assert_eq!(nations.items[1].manpower, 750);
     }
 
     #[test]
