@@ -7,7 +7,7 @@ use teleology_core::{
     PopupAnchor, ProvinceId, ProvinceStore, TickUnit, TimeConfig, WorldBounds,
 };
 use crate::utils::*;
-use crate::{EditorApp, MapEditorPaintMode, PendingContextAction};
+use crate::{EditorApp, MapEditorPaintMode, PendingContextAction, ScopeKind};
 
 impl EditorApp {
     pub(crate) fn ui_map_editor(&mut self, ctx: &egui::Context) {
@@ -901,48 +901,7 @@ impl EditorApp {
                     world.get_resource::<WorldBounds>(),
                     world.get_resource::<NationStore>(),
                 );
-                if let (Some(bounds), Some(nations)) = (bounds, nations) {
-                    egui::ScrollArea::vertical()
-                        .auto_shrink([false; 2])
-                        .show(ui, |ui| {
-                            for (i, n) in nations.nations.iter().enumerate().take(bounds.nation_count as usize) {
-                                let id = (i + 1) as u32;
-                                let selected = self.selected_nation == Some(id);
-                                let label_response = ui.horizontal(|ui| {
-                                    let (rect, _) = ui.allocate_exact_size(
-                                        egui::Vec2::new(12.0, 12.0),
-                                        egui::Sense::hover(),
-                                    );
-                                    ui.painter().rect_filled(rect, 2.0, nation_color(id));
-                                    ui.add_space(6.0);
-                                    ui.selectable_label(selected, format!("Nation {}", id))
-                                        .on_hover_text(format!(
-                                            "Prestige: {}  Stability: {}  Treasury: {}",
-                                            n.prestige, n.stability, n.treasury,
-                                        ))
-                                }).inner;
-                                if label_response.clicked() {
-                                    self.selected_nation = Some(id);
-                                }
-                                label_response.context_menu(|ui| {
-                                    ui.label("Nation actions (init on first use):");
-                                    ui.separator();
-                                    if ui.button("Set tag\u{2026}").clicked() {
-                                        self.pending_context_action = Some(PendingContextAction::SetTagNation(id));
-                                        ui.close_menu();
-                                    }
-                                    if ui.button("Add modifier\u{2026}").clicked() {
-                                        self.pending_context_action = Some(PendingContextAction::AddModifierNation(id));
-                                        ui.close_menu();
-                                    }
-                                });
-                                ui.add_space(2.0);
-                            }
-                        });
-                } else {
-                    ui.label("No world loaded.");
-                }
-                ui.add_space(8.0);
+                ui_nation_list(ui, bounds, nations, &mut self.selected_nation, &mut self.pending_context_action);
             });
     }
 
@@ -981,7 +940,7 @@ impl EditorApp {
                     egui::ScrollArea::vertical()
                         .auto_shrink([false; 2])
                         .show(ui, |ui| {
-                            for (i, p) in provinces.provinces.iter().enumerate().take(bounds.province_count as usize) {
+                            for (i, p) in provinces.items.iter().enumerate().take(bounds.province_count as usize) {
                                 let id = (i + 1) as u32;
                                 let selected = self.selected_province == Some(id);
                                 let owner_raw = p.owner.map(|n| n.0.get()).unwrap_or(0);
@@ -1015,11 +974,11 @@ impl EditorApp {
                                     ui.label("Province actions (init on first use):");
                                     ui.separator();
                                     if ui.button("Set tag\u{2026}").clicked() {
-                                        self.pending_context_action = Some(PendingContextAction::SetTagProvince(id));
+                                        self.pending_context_action = Some(PendingContextAction::SetTag(ScopeKind::Province, id));
                                         ui.close_menu();
                                     }
                                     if ui.button("Add modifier\u{2026}").clicked() {
-                                        self.pending_context_action = Some(PendingContextAction::AddModifierProvince(id));
+                                        self.pending_context_action = Some(PendingContextAction::AddModifier(ScopeKind::Province, id));
                                         ui.close_menu();
                                     }
                                     if ui.button("Fire event\u{2026}").clicked() {
@@ -1065,48 +1024,59 @@ impl EditorApp {
                     world.get_resource::<WorldBounds>(),
                     world.get_resource::<NationStore>(),
                 );
-                if let (Some(bounds), Some(nations)) = (bounds, nations) {
-                    egui::ScrollArea::vertical()
-                        .auto_shrink([false; 2])
-                        .show(ui, |ui| {
-                            for (i, n) in nations.nations.iter().enumerate().take(bounds.nation_count as usize) {
-                                let id = (i + 1) as u32;
-                                let selected = self.selected_nation == Some(id);
-                                let label_response = ui.horizontal(|ui| {
-                                    let (rect, _) = ui.allocate_exact_size(
-                                        egui::Vec2::new(12.0, 12.0),
-                                        egui::Sense::hover(),
-                                    );
-                                    ui.painter().rect_filled(rect, 2.0, nation_color(id));
-                                    ui.add_space(6.0);
-                                    ui.selectable_label(selected, format!("Nation {}", id))
-                                        .on_hover_text(format!(
-                                            "Prestige: {}  Stability: {}  Treasury: {}",
-                                            n.prestige, n.stability, n.treasury,
-                                        ))
-                                }).inner;
-                                if label_response.clicked() {
-                                    self.selected_nation = Some(id);
-                                }
-                                label_response.context_menu(|ui| {
-                                    ui.label("Nation actions (init on first use):");
-                                    ui.separator();
-                                    if ui.button("Set tag\u{2026}").clicked() {
-                                        self.pending_context_action = Some(PendingContextAction::SetTagNation(id));
-                                        ui.close_menu();
-                                    }
-                                    if ui.button("Add modifier\u{2026}").clicked() {
-                                        self.pending_context_action = Some(PendingContextAction::AddModifierNation(id));
-                                        ui.close_menu();
-                                    }
-                                });
-                                ui.add_space(2.0);
-                            }
-                        });
-                } else {
-                    ui.label("No world loaded.");
-                }
-                ui.add_space(8.0);
+                ui_nation_list(ui, bounds, nations, &mut self.selected_nation, &mut self.pending_context_action);
             });
     }
+}
+
+/// Shared nation list rendering for left and right panels.
+fn ui_nation_list(
+    ui: &mut egui::Ui,
+    bounds: Option<&WorldBounds>,
+    nations: Option<&NationStore>,
+    selected_nation: &mut Option<u32>,
+    pending_action: &mut Option<PendingContextAction>,
+) {
+    if let (Some(bounds), Some(nations)) = (bounds, nations) {
+        egui::ScrollArea::vertical()
+            .auto_shrink([false; 2])
+            .show(ui, |ui| {
+                for (i, n) in nations.items.iter().enumerate().take(bounds.nation_count as usize) {
+                    let id = (i + 1) as u32;
+                    let selected = *selected_nation == Some(id);
+                    let label_response = ui.horizontal(|ui| {
+                        let (rect, _) = ui.allocate_exact_size(
+                            egui::Vec2::new(12.0, 12.0),
+                            egui::Sense::hover(),
+                        );
+                        ui.painter().rect_filled(rect, 2.0, nation_color(id));
+                        ui.add_space(6.0);
+                        ui.selectable_label(selected, format!("Nation {}", id))
+                            .on_hover_text(format!(
+                                "Prestige: {}  Stability: {}  Treasury: {}",
+                                n.prestige, n.stability, n.treasury,
+                            ))
+                    }).inner;
+                    if label_response.clicked() {
+                        *selected_nation = Some(id);
+                    }
+                    label_response.context_menu(|ui| {
+                        ui.label("Nation actions (init on first use):");
+                        ui.separator();
+                        if ui.button("Set tag\u{2026}").clicked() {
+                            *pending_action = Some(PendingContextAction::SetTag(ScopeKind::Nation, id));
+                            ui.close_menu();
+                        }
+                        if ui.button("Add modifier\u{2026}").clicked() {
+                            *pending_action = Some(PendingContextAction::AddModifier(ScopeKind::Nation, id));
+                            ui.close_menu();
+                        }
+                    });
+                    ui.add_space(2.0);
+                }
+            });
+    } else {
+        ui.label("No world loaded.");
+    }
+    ui.add_space(8.0);
 }

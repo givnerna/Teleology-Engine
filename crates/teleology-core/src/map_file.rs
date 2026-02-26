@@ -85,8 +85,8 @@ impl MapFile {
             .get_resource::<ProvinceAdjacency>()
             .cloned()
             .unwrap_or_else(|| compute_adjacency(&map_kind, bounds.province_count));
-        let provinces = world.get_resource::<ProvinceStore>()?.provinces.clone();
-        let nations = world.get_resource::<NationStore>()?.nations.clone();
+        let provinces = world.get_resource::<ProvinceStore>()?.items.clone();
+        let nations = world.get_resource::<NationStore>()?.items.clone();
 
         // Optional modules (resources).
         let tag_registry = world.get_resource::<TagRegistry>().cloned();
@@ -240,12 +240,8 @@ impl MapFile {
         }
         world.insert_resource(self.map_kind.clone());
         world.insert_resource(self.adjacency.clone());
-        world.insert_resource(ProvinceStore {
-            provinces: self.provinces.clone(),
-        });
-        world.insert_resource(NationStore {
-            nations: self.nations.clone(),
-        });
+        world.insert_resource(ProvinceStore::from_vec(self.provinces.clone()));
+        world.insert_resource(NationStore::from_vec(self.nations.clone()));
 
         // Optional resources.
         if let Some(reg) = &self.tag_registry {
@@ -543,9 +539,9 @@ mod tests {
         let mut world2 = World::new();
         mf.apply_to_world(&mut world2);
         let store = world2.get_resource::<ProvinceStore>().unwrap();
-        assert_eq!(store.provinces.len(), 4);
+        assert_eq!(store.len(), 4);
         let nstore = world2.get_resource::<NationStore>().unwrap();
-        assert_eq!(nstore.nations.len(), 2);
+        assert_eq!(nstore.len(), 2);
     }
 
     #[test]

@@ -370,7 +370,7 @@ pub fn system_diplomacy_war_score(
         let mut attacker_occupied = 0i32;
         let mut defender_occupied = 0i32;
 
-        for prov in &provinces.provinces {
+        for prov in &provinces.items {
             if let Some(owner) = prov.owner {
                 // If a defender's province is occupied by an attacker.
                 if war.attackers.contains(&owner) {

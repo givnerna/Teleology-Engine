@@ -5,11 +5,19 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::world::{NationId, ProvinceId};
+use crate::world::{NationId, ProvinceId, ScopeId};
 
 /// Terrain type for a province (Paradox-style: land vs sea).
 pub const TERRAIN_LAND: u8 = 0;
 pub const TERRAIN_SEA: u8 = 1;
+
+/// Shared interface for scope entities (Province, Nation) so generic stores
+/// and systems can construct and identify them without knowing concrete types.
+pub trait ScopeEntity: Clone + Send + Sync + 'static {
+    type Id: ScopeId;
+    fn id(&self) -> Self::Id;
+    fn default_for(id: Self::Id) -> Self;
+}
 
 /// Province: one map tile/region. SoA-friendly: if you need max perf,
 /// split into e.g. `owner: Vec<NationId>`, `terrain: Vec<u8>`, etc.
@@ -26,7 +34,19 @@ pub struct Province {
 }
 
 impl Province {
-    pub fn default_for(id: ProvinceId) -> Self {
+    #[inline]
+    pub fn is_land(&self) -> bool {
+        self.terrain == TERRAIN_LAND
+    }
+}
+
+impl ScopeEntity for Province {
+    type Id = ProvinceId;
+
+    #[inline]
+    fn id(&self) -> ProvinceId { self.id }
+
+    fn default_for(id: ProvinceId) -> Self {
         Self {
             id,
             owner: None,
@@ -35,11 +55,6 @@ impl Province {
             development: [1, 1, 1],
             population: 0,
         }
-    }
-
-    #[inline]
-    pub fn is_land(&self) -> bool {
-        self.terrain == TERRAIN_LAND
     }
 }
 
@@ -56,8 +71,13 @@ pub struct Nation {
     pub war_exhaustion: f32,
 }
 
-impl Nation {
-    pub fn default_for(id: NationId) -> Self {
+impl ScopeEntity for Nation {
+    type Id = NationId;
+
+    #[inline]
+    fn id(&self) -> NationId { self.id }
+
+    fn default_for(id: NationId) -> Self {
         Self {
             id,
             name_id: 0,
@@ -87,7 +107,7 @@ mod tests {
     #[test]
     fn province_default_for() {
         let pid = ProvinceId::from_raw(5);
-        let p = Province::default_for(pid);
+        let p = <Province as ScopeEntity>::default_for(pid);
         assert_eq!(p.id, pid);
         assert!(p.owner.is_none());
         assert!(p.occupation.is_none());
@@ -98,7 +118,7 @@ mod tests {
 
     #[test]
     fn province_is_land() {
-        let mut p = Province::default_for(ProvinceId::from_raw(1));
+        let mut p = <Province as ScopeEntity>::default_for(ProvinceId::from_raw(1));
         assert!(p.is_land());
         p.terrain = TERRAIN_SEA;
         assert!(!p.is_land());
@@ -107,7 +127,7 @@ mod tests {
     #[test]
     fn nation_default_for() {
         let nid = NationId::from_raw(3);
-        let n = Nation::default_for(nid);
+        let n = <Nation as ScopeEntity>::default_for(nid);
         assert_eq!(n.id, nid);
         assert_eq!(n.name_id, 0);
         assert_eq!(n.prestige, 0);
@@ -119,7 +139,7 @@ mod tests {
 
     #[test]
     fn province_ownership() {
-        let mut p = Province::default_for(ProvinceId::from_raw(1));
+        let mut p = <Province as ScopeEntity>::default_for(ProvinceId::from_raw(1));
         assert!(p.owner.is_none());
         p.owner = Some(NationId::from_raw(2));
         assert_eq!(p.owner.unwrap(), NationId::from_raw(2));
@@ -127,7 +147,7 @@ mod tests {
 
     #[test]
     fn province_occupation() {
-        let mut p = Province::default_for(ProvinceId::from_raw(1));
+        let mut p = <Province as ScopeEntity>::default_for(ProvinceId::from_raw(1));
         p.owner = Some(NationId::from_raw(1));
         p.occupation = Some(NationId::from_raw(2));
         assert_ne!(p.owner, p.occupation);

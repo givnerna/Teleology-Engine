@@ -39,13 +39,18 @@ pub enum EditorMode {
     Media,
 }
 
+/// Province or Nation — used in unified context actions.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ScopeKind {
+    Province,
+    Nation,
+}
+
 /// Deferred context-menu action (run after panel so we don't hold world while ensuring).
 #[derive(Clone, Copy)]
 enum PendingContextAction {
-    SetTagProvince(u32),
-    SetTagNation(u32),
-    AddModifierProvince(u32),
-    AddModifierNation(u32),
+    SetTag(ScopeKind, u32),
+    AddModifier(ScopeKind, u32),
     FireEventProvince(u32),
     SpawnArmyProvince(u32),
     // Event editor actions
@@ -501,21 +506,19 @@ impl EditorApp {
     fn process_pending_context_action(&mut self) {
         let Some(action) = self.pending_context_action.take() else { return };
         match action {
-            PendingContextAction::SetTagProvince(id) => {
+            PendingContextAction::SetTag(scope, id) => {
                 self.ensure_tags();
-                self.selected_province = Some(id);
+                match scope {
+                    ScopeKind::Province => self.selected_province = Some(id),
+                    ScopeKind::Nation => self.selected_nation = Some(id),
+                }
             }
-            PendingContextAction::SetTagNation(id) => {
-                self.ensure_tags();
-                self.selected_nation = Some(id);
-            }
-            PendingContextAction::AddModifierProvince(id) => {
+            PendingContextAction::AddModifier(scope, id) => {
                 self.ensure_modifiers();
-                self.selected_province = Some(id);
-            }
-            PendingContextAction::AddModifierNation(id) => {
-                self.ensure_modifiers();
-                self.selected_nation = Some(id);
+                match scope {
+                    ScopeKind::Province => self.selected_province = Some(id),
+                    ScopeKind::Nation => self.selected_nation = Some(id),
+                }
             }
             PendingContextAction::FireEventProvince(id) => {
                 self.ensure_events();

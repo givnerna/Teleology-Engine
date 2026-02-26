@@ -5,9 +5,10 @@
 
 use bevy_ecs::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::marker::PhantomData;
 use std::num::NonZeroU32;
 
-use crate::archetypes::{Nation, Province};
+use crate::archetypes::{Nation, Province, ScopeEntity};
 
 /// Trait for scope ids (ProvinceId, NationId) so generic systems can work with either.
 pub trait ScopeId: Clone + Copy + PartialEq + Eq + std::hash::Hash + Send + Sync + 'static {
@@ -259,50 +260,73 @@ impl ProvinceAdjacency {
     }
 }
 
-/// Bulk province data — struct-of-arrays style for one component.
-/// In a full implementation each field would be a `Vec<T>`; here we use
-/// a single struct per province for clarity; you can split into SoA later.
-#[derive(Resource, Clone, Serialize, Deserialize)]
-pub struct ProvinceStore {
-    pub provinces: Vec<Province>,
+/// Generic dense store for any scope entity (provinces, nations, etc.).
+/// Backed by a `Vec<T>` indexed via `Id::index()` for cache-friendly access.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ScopedStore<Id: ScopeId, T: Clone> {
+    pub items: Vec<T>,
+    #[serde(skip)]
+    _phantom: PhantomData<Id>,
 }
 
-impl ProvinceStore {
-    #[inline]
-    pub fn get(&self, id: ProvinceId) -> Option<&Province> {
-        self.provinces.get(id.index())
+impl<Id: ScopeId, T: ScopeEntity<Id = Id>> ScopedStore<Id, T> {
+    /// Create a store pre-filled with `count` default entities (ids 1..=count).
+    pub fn new(count: u32) -> Self {
+        ScopedStore {
+            items: (0..count)
+                .map(|i| T::default_for(Id::from_raw(i + 1)))
+                .collect(),
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<Id: ScopeId, T: Clone> ScopedStore<Id, T> {
+    /// Wrap an existing Vec as a store.
+    pub fn from_vec(items: Vec<T>) -> Self {
+        ScopedStore { items, _phantom: PhantomData }
     }
 
     #[inline]
-    pub fn get_mut(&mut self, id: ProvinceId) -> Option<&mut Province> {
-        self.provinces.get_mut(id.index())
+    pub fn get(&self, id: Id) -> Option<&T> {
+        self.items.get(id.index())
     }
 
     #[inline]
-    pub fn iter(&self) -> impl Iterator<Item = (ProvinceId, &Province)> {
-        self.provinces.iter().enumerate().map(|(i, p)| {
-            (ProvinceId(NonZeroU32::new((i + 1) as u32).unwrap()), p)
+    pub fn get_mut(&mut self, id: Id) -> Option<&mut T> {
+        self.items.get_mut(id.index())
+    }
+
+    #[inline]
+    pub fn iter(&self) -> impl Iterator<Item = (Id, &T)> {
+        self.items.iter().enumerate().map(|(i, item)| {
+            (Id::from_raw((i + 1) as u32), item)
         })
     }
+
+    #[inline]
+    pub fn push(&mut self, item: T) {
+        self.items.push(item);
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
 }
+
+/// Bulk province data.
+pub type ProvinceStore = ScopedStore<ProvinceId, Province>;
+impl Resource for ScopedStore<ProvinceId, Province> {}
 
 /// Bulk nation data.
-#[derive(Resource, Clone, Serialize, Deserialize)]
-pub struct NationStore {
-    pub nations: Vec<Nation>,
-}
-
-impl NationStore {
-    #[inline]
-    pub fn get(&self, id: NationId) -> Option<&Nation> {
-        self.nations.get(id.index())
-    }
-
-    #[inline]
-    pub fn get_mut(&mut self, id: NationId) -> Option<&mut Nation> {
-        self.nations.get_mut(id.index())
-    }
-}
+pub type NationStore = ScopedStore<NationId, Nation>;
+impl Resource for ScopedStore<NationId, Nation> {}
 
 /// What unit of time a single simulation tick represents.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
@@ -703,16 +727,8 @@ impl WorldBuilder {
         world.insert_resource(time);
         world.insert_resource(time.to_date());
         world.insert_resource(self.time_config.unwrap_or_default());
-        world.insert_resource(ProvinceStore {
-            provinces: (0..self.province_count)
-                .map(|i| Province::default_for(ProvinceId(NonZeroU32::new(i + 1).unwrap())))
-                .collect(),
-        });
-        world.insert_resource(NationStore {
-            nations: (0..self.nation_count)
-                .map(|i| Nation::default_for(NationId(NonZeroU32::new(i + 1).unwrap())))
-                .collect(),
-        });
+        world.insert_resource(ProvinceStore::new(self.province_count));
+        world.insert_resource(NationStore::new(self.nation_count));
         if let Some(mk) = self.map_kind {
             world.insert_resource(mk);
         }
@@ -811,7 +827,7 @@ pub fn add_province_to_world(world: &mut World) -> Option<u32> {
     bounds.province_count = new_raw;
 
     let mut store = world.get_resource_mut::<ProvinceStore>()?;
-    store.provinces.push(Province::default_for(ProvinceId(
+    store.push(Province::default_for(ProvinceId(
         NonZeroU32::new(new_raw).unwrap(),
     )));
 
@@ -918,9 +934,9 @@ mod tests {
         let date = world.get_resource::<GameDate>().unwrap();
         assert_eq!(date.year, 1444);
         let store = world.get_resource::<ProvinceStore>().unwrap();
-        assert_eq!(store.provinces.len(), 5);
+        assert_eq!(store.len(), 5);
         let nations = world.get_resource::<NationStore>().unwrap();
-        assert_eq!(nations.nations.len(), 3);
+        assert_eq!(nations.len(), 3);
     }
 
     #[test]

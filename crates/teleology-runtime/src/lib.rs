@@ -414,6 +414,7 @@ pub extern "C" fn teleology_input_key_down(engine: *mut TeleologyEngine, key_cod
 #[cfg(test)]
 mod tests {
     use super::*;
+    use teleology_core::GameDate;
 
     #[test]
     fn engine_context_tick_advances_date() {

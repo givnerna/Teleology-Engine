@@ -127,7 +127,7 @@ pub fn system_pop_growth(
     provinces: Res<ProvinceStore>,
     mut pops: ResMut<ProvincePops>,
 ) {
-    for (i, prov) in provinces.provinces.iter().enumerate() {
+    for (i, prov) in provinces.items.iter().enumerate() {
         let total_dev = prov.development[0] as u32 + prov.development[1] as u32 + prov.development[2] as u32;
         let capacity = total_dev * config.carrying_capacity_per_dev;
 
@@ -156,7 +156,7 @@ pub fn system_pop_unrest(
     nation_tags: Option<Res<NationTags>>,
     mut pops: ResMut<ProvincePops>,
 ) {
-    for (i, prov) in provinces.provinces.iter().enumerate() {
+    for (i, prov) in provinces.items.iter().enumerate() {
         let owner = match prov.owner {
             Some(o) => o,
             None => continue,
@@ -174,7 +174,7 @@ pub fn system_pop_unrest(
         };
 
         // Get stability modifier.
-        let stability = nations.nations.get(owner.index())
+        let stability = nations.items.get(owner.index())
             .map(|n| n.stability)
             .unwrap_or(0);
         let stability_unrest = if stability < 0 {
@@ -220,7 +220,7 @@ pub fn system_pop_assimilation(
     nation_tags: Option<Res<NationTags>>,
     mut pops: ResMut<ProvincePops>,
 ) {
-    for (i, prov) in provinces.provinces.iter().enumerate() {
+    for (i, prov) in provinces.items.iter().enumerate() {
         let owner = match prov.owner {
             Some(o) => o,
             None => continue,
