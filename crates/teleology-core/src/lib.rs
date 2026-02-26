@@ -85,7 +85,7 @@ pub use tags::{
 };
 pub use world::GameWorld;
 pub use world::{
-    add_province_to_world, GameDate, GameTime, HexMapLayout, MapKind, MapLayout, NationId,
+    add_nation_to_world, add_province_to_world, GameDate, GameTime, HexMapLayout, MapKind, MapLayout, NationId,
     NationStore, ProvinceAdjacency, ProvinceId, ProvincePolygon, ProvinceStore, ScopeId,
     ScopedStore, TickUnit, TimeConfig, VectorMapLayout, WorldBounds, WorldBuilder,
 };

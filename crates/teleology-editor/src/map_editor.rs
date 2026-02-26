@@ -1,7 +1,7 @@
 use eframe::egui;
 use std::num::NonZeroU32;
 use teleology_core::{
-    add_province_to_world, pull_next_event, queue_event,
+    add_nation_to_world, add_province_to_world, pull_next_event, queue_event,
     ActiveEvent, EventPopupStyle, EventRegistry,
     GameDate, GameTime, KeywordRegistry, MapKind, NationId, NationStore,
     PopupAnchor, ProvinceId, ProvinceStore, TickUnit, TimeConfig, WorldBounds,
@@ -896,12 +896,19 @@ impl EditorApp {
                 );
 
                 ui.add_space(4.0);
-                if ui.button("+ Add province").clicked() {
-                    self.push_undo();
-                    if let Some(new_id) = add_province_to_world(self.engine.world_mut()) {
-                        self.selected_province = Some(new_id);
+                ui.horizontal(|ui| {
+                    if ui.button("+ Province").clicked() {
+                        self.push_undo();
+                        if let Some(new_id) = add_province_to_world(self.engine.world_mut()) {
+                            self.selected_province = Some(new_id);
+                        }
                     }
-                }
+                    if ui.button("+ Nation").clicked() {
+                        if let Some(new_id) = add_nation_to_world(self.engine.world_mut()) {
+                            self.selected_nation = Some(new_id);
+                        }
+                    }
+                });
 
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {

@@ -176,6 +176,14 @@ pub struct EditorApp {
     // --- Hierarchy tree view (Unity-style nested location ownership) ---
     /// Which nation nodes are collapsed in the hierarchy tree. 0 = "Unowned" group.
     hierarchy_collapsed: HashSet<u32>,
+
+    // --- New World creation form ---
+    new_world_province_count: u32,
+    new_world_nation_count: u32,
+    new_world_map_width: u32,
+    new_world_map_height: u32,
+    /// 0 = Square, 1 = Hex
+    new_world_map_type: u32,
 }
 
 impl EditorApp {
@@ -246,6 +254,12 @@ impl EditorApp {
             project_drop_status_ttl: 0,
 
             hierarchy_collapsed: HashSet::new(),
+
+            new_world_province_count: 100,
+            new_world_nation_count: 20,
+            new_world_map_width: 20,
+            new_world_map_height: 10,
+            new_world_map_type: 0,
         }
     }
 }

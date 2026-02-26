@@ -847,6 +847,32 @@ pub fn add_province_to_world(world: &mut World) -> Option<u32> {
     Some(new_raw)
 }
 
+/// Add one new nation to an existing world (e.g. from the map editor).
+/// Extends WorldBounds, NationStore, and optionally NationModifiers, DiplomaticRelations, NationBudgets, and ProgressState.
+/// Returns the new nation raw id (1-based).
+pub fn add_nation_to_world(world: &mut World) -> Option<u32> {
+    let mut bounds = world.get_resource_mut::<WorldBounds>()?;
+    let new_raw = bounds.nation_count + 1;
+    bounds.nation_count = new_raw;
+
+    let mut store = world.get_resource_mut::<NationStore>()?;
+    store.push(Nation::default_for(NationId(
+        NonZeroU32::new(new_raw).unwrap(),
+    )));
+
+    if let Some(mut nm) = world.get_resource_mut::<crate::modifiers::NationModifiers>() {
+        nm.per_scope.push(Vec::new());
+    }
+    if let Some(mut nb) = world.get_resource_mut::<crate::economy::NationBudgets>() {
+        nb.budgets.push(crate::economy::BudgetEntry::default());
+    }
+    if let Some(mut ps) = world.get_resource_mut::<crate::progress_trees::ProgressState>() {
+        ps.per_nation.push(std::collections::HashMap::new());
+    }
+
+    Some(new_raw)
+}
+
 /// Convenience type for the full game world (ECS + resources).
 pub type GameWorld = World;
 
