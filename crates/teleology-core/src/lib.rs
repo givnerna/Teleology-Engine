@@ -30,7 +30,7 @@ pub mod simulation;
 pub mod tags;
 pub mod world;
 
-pub use archetypes::{Nation, Province, ScopeEntity, Unit, TERRAIN_LAND, TERRAIN_SEA};
+pub use archetypes::{Nation, Province, ScopeEntity, TerrainRegistry, TerrainType, Unit, TERRAIN_LAND, TERRAIN_SEA};
 pub use batch::par_provinces_mut;
 pub use character_gen::{
     CharacterGenConfig, CharacterGenerator, DefaultCharacterGenerator, GenContext,
@@ -85,7 +85,8 @@ pub use tags::{
 };
 pub use world::GameWorld;
 pub use world::{
-    add_nation_to_world, add_province_to_world, GameDate, GameTime, HexMapLayout, MapKind, MapLayout, NationId,
+    add_nation_to_world, add_province_to_world, generate_provinces_hex, generate_provinces_square,
+    GameDate, GameTime, HexMapLayout, MapKind, MapLayout, NationId,
     NationStore, ProvinceAdjacency, ProvinceId, ProvincePolygon, ProvinceStore, ScopeId,
     ScopedStore, TickUnit, TimeConfig, VectorMapLayout, WorldBounds, WorldBuilder,
 };
