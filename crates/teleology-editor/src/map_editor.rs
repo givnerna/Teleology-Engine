@@ -1,1240 +1,1552 @@
+//! Map editor: paint provinces, assign owners, Civ-style terrain painting.
+//!
+//! Layout: left panel (hierarchy tree) | central panel (map canvas + toolbar) | right panel (inspector).
+
 use eframe::egui;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::num::NonZeroU32;
+
 use teleology_core::{
-    add_nation_to_world, add_province_to_world, pull_next_event, queue_event,
-    ActiveEvent, EventPopupStyle, EventRegistry,
-    GameDate, GameTime, KeywordRegistry, MapKind, NationId, NationStore,
-    PopupAnchor, ProvinceId, ProvinceStore, TickUnit, TimeConfig, WorldBounds,
+    add_nation_to_world, add_province_to_world, generate_provinces_hex, generate_provinces_square,
+    ActiveEvent, EventPopupStyle, EventQueue, EventInstance,
+    HexMapLayout, MapKind, MapLayout, NationId, NationStore, ProvinceStore,
+    TerrainRegistry, WorldBounds,
 };
+
+use crate::{EditorApp, MapTool, MapViewMode, PendingContextAction, ScopeKind};
 use crate::utils::*;
-use crate::{EditorApp, MapEditorPaintMode, PendingContextAction, ScopeKind};
+
+// ---------------------------------------------------------------------------
+// Color helpers
+// ---------------------------------------------------------------------------
+
+/// Deterministic province color (for Province view mode). Hash-based so each
+/// province gets a visually distinct hue.
+fn province_color(raw: u32) -> egui::Color32 {
+    if raw == 0 {
+        return egui::Color32::from_rgb(0x30, 0x30, 0x30);
+    }
+    // Simple hash to spread hues
+    let h = raw.wrapping_mul(2654435761); // Knuth multiplicative hash
+    let r = ((h >> 0) & 0xFF) as u8;
+    let g = ((h >> 8) & 0xFF) as u8;
+    let b = ((h >> 16) & 0xFF) as u8;
+    // Clamp to avoid too-dark colors
+    let r = 60 + (r % 180);
+    let g = 60 + (g % 180);
+    let b = 60 + (b % 180);
+    egui::Color32::from_rgb(r, g, b)
+}
+
+/// Convert TerrainRegistry RGBA to egui Color32.
+fn terrain_egui_color(c: [u8; 4]) -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3])
+}
+
+// ---------------------------------------------------------------------------
+// Top-level: ui_map_editor
+// ---------------------------------------------------------------------------
 
 impl EditorApp {
     pub(crate) fn ui_map_editor(&mut self, ctx: &egui::Context) {
-        let paint_ownership = self.map_paint_mode == MapEditorPaintMode::PaintOwnership;
-        let show_names = self.show_map_names;
-        let is_irregular = self
-            .engine
-            .world()
-            .get_resource::<MapKind>()
-            .map(|mk| matches!(mk, MapKind::Irregular(_)))
-            .unwrap_or(false);
-
-        // Left panel: unified hierarchy tree (Nation → Province ownership)
-        self.ui_hierarchy_tree_panel(ctx);
-
-        // Right panel: nations for Edit provinces or Irregular (Assign)
-        if !paint_ownership || is_irregular {
-            self.ui_map_editor_nations_panel_right(ctx);
-        }
-
-        egui::CentralPanel::default()
-            .frame(panel_frame())
-            .show(ctx, |ui| {
-                panel_header(ui, "Scene");
-                ui.add_space(6.0);
-                let date = self.engine.world().get_resource::<GameDate>().copied().unwrap_or_default();
-                let time = self.engine.world().get_resource::<GameTime>().copied();
-                let tick_unit = self.engine.world().get_resource::<TimeConfig>()
-                    .map(|c| c.tick_unit).unwrap_or(TickUnit::Day);
-                let needs_time = matches!(tick_unit, TickUnit::Second | TickUnit::Minute | TickUnit::Hour);
-                ui.horizontal(|ui| {
-                    ui.strong("Date:");
-                    ui.add_space(4.0);
-                    if needs_time {
-                        if let Some(t) = time {
-                            ui.label(format!("{}-{:02}-{:02} {:02}:{:02}:{:02}", date.year, date.month, date.day, t.hour, t.minute, t.second));
-                        } else {
-                            ui.label(format!("{}-{:02}-{:02}", date.year, date.month, date.day));
-                        }
-                    } else {
-                        ui.label(format!("{}-{:02}-{:02}", date.year, date.month, date.day));
-                    }
-                });
-                ui.add_space(4.0);
-
-                // --- Toolbar row: paint mode + brush size + zoom + shortcuts hint ---
-                ui.horizontal(|ui| {
-                    ui.label("Mode:");
-                    ui.radio_value(
-                        &mut self.map_paint_mode,
-                        MapEditorPaintMode::PaintOwnership,
-                        "Paint ownership",
-                    );
-                    ui.radio_value(
-                        &mut self.map_paint_mode,
-                        MapEditorPaintMode::EditProvinces,
-                        "Edit provinces",
-                    );
-                    ui.separator();
-                    ui.label("Brush:");
-                    let brush_label = match self.brush_radius {
-                        0 => "1x1",
-                        1 => "3x3",
-                        2 => "5x5",
-                        _ => "7x7",
-                    };
-                    if ui.button(brush_label).on_hover_text("[ / ] to change").clicked() {
-                        self.brush_radius = (self.brush_radius + 1) % 4;
-                    }
-                    ui.separator();
-                    ui.label(format!("Zoom: {:.0}%", self.map_zoom * 100.0));
-                    if ui.small_button("Reset").on_hover_text("Reset zoom & pan").clicked() {
-                        self.map_zoom = 1.0;
-                        self.map_pan = egui::Vec2::ZERO;
-                    }
-                    ui.separator();
-                    ui.checkbox(&mut self.show_map_names, "Names")
-                        .on_hover_text("Show province/nation labels on the map (N)");
-                });
-                ui.add_space(2.0);
-
-                // --- Help text ---
-                let hint = if paint_ownership {
-                    "LMB: paint nation | RMB: erase (set empty) | Scroll: zoom | Middle-drag: pan | Tab: switch mode | [ ] brush size"
-                } else {
-                    "LMB: paint province | RMB: erase (set empty) | Scroll: zoom | Middle-drag: pan | Tab: switch mode | [ ] brush size"
-                };
-                ui.label(
-                    egui::RichText::new(hint)
-                        .small()
-                        .color(ui.visuals().weak_text_color()),
-                );
-                ui.add_space(4.0);
-
-                let world = self.engine.world();
-                let map_kind = world.get_resource::<MapKind>();
-                let store = world.get_resource::<ProvinceStore>();
-
-                // --- Tile hit result: coordinates + erase flag ---
-                #[derive(Clone, Copy)]
-                enum TileHit {
-                    Square(u32, u32),
-                    Hex(u32, u32),
-                }
-
-                // --- Hover info for tooltip ---
-                struct HoverInfo {
-                    coords: String,
-                    province_raw: u32,
-                    owner_raw: u32,
-                    dev: [u16; 3],
-                    terrain: u8,
-                }
-
-                let zoom = self.map_zoom;
-
-                let (_map_bounds, tile_hit, click_only_hit, erase_hit, hover_info) = {
-                    if let (Some(mk), Some(st)) = (map_kind, store) {
-                        match mk {
-                            MapKind::Square(map) => {
-                                let base_cell = 14.0_f32;
-                                let cell_size = base_cell * zoom;
-                                let canvas_w = map.width as f32 * cell_size;
-                                let canvas_h = map.height as f32 * cell_size;
-                                let (response, painter) = ui.allocate_painter(
-                                    ui.available_size().max(egui::Vec2::new(canvas_w, canvas_h)),
-                                    egui::Sense::click_and_drag(),
-                                );
-                                let rect = response.rect;
-
-                                // --- Zoom (scroll wheel) ---
-                                let scroll = ctx.input(|i| i.smooth_scroll_delta.y);
-                                if response.hovered() && scroll.abs() > 0.1 {
-                                    let factor = 1.0 + scroll * 0.002;
-                                    let new_zoom = (self.map_zoom * factor).clamp(0.25, 6.0);
-                                    // Zoom toward cursor
-                                    if let Some(cursor) = response.hover_pos() {
-                                        let rel = cursor - rect.min - self.map_pan;
-                                        self.map_pan += rel * (1.0 - new_zoom / self.map_zoom);
-                                    }
-                                    self.map_zoom = new_zoom;
-                                }
-                                // --- Pan (middle-drag) ---
-                                if response.dragged_by(egui::PointerButton::Middle) {
-                                    self.map_pan += response.drag_delta();
-                                }
-
-                                let cell_size = base_cell * self.map_zoom;
-                                let origin = rect.min + self.map_pan;
-
-                                // --- Render tiles ---
-                                // Visible range culling
-                                let vis_x0 = (((rect.min.x - origin.x) / cell_size).floor() as i32).max(0) as u32;
-                                let vis_y0 = (((rect.min.y - origin.y) / cell_size).floor() as i32).max(0) as u32;
-                                let vis_x1 = (((rect.max.x - origin.x) / cell_size).ceil() as i32 + 1).max(0) as u32;
-                                let vis_y1 = (((rect.max.y - origin.y) / cell_size).ceil() as i32 + 1).max(0) as u32;
-
-                                for y in vis_y0..vis_y1.min(map.height) {
-                                    for x in vis_x0..vis_x1.min(map.width) {
-                                        let raw = map.get(x, y);
-                                        let (owner_raw, is_selected_prov, is_selected_nation) = if raw == 0 {
-                                            (0u32, false, false)
-                                        } else {
-                                            let owner = st
-                                                .get(ProvinceId(NonZeroU32::new(raw).unwrap()))
-                                                .and_then(|p| p.owner)
-                                                .map(|n| n.0.get())
-                                                .unwrap_or(0);
-                                            let sp = self.selected_province == Some(raw);
-                                            let sn = owner != 0 && self.selected_nation == Some(owner);
-                                            (owner, sp, sn)
-                                        };
-                                        let base_color = if raw == 0 {
-                                            TILE_EMPTY_COLOR
-                                        } else if owner_raw == 0 {
-                                            TILE_UNOWNED_PROVINCE_COLOR
-                                        } else {
-                                            nation_color(owner_raw)
-                                        };
-                                        let xf = origin.x + x as f32 * cell_size;
-                                        let yf = origin.y + y as f32 * cell_size;
-                                        let tile_rect = egui::Rect::from_min_size(
-                                            egui::Pos2::new(xf, yf),
-                                            egui::Vec2::new(cell_size - 1.0, cell_size - 1.0),
-                                        );
-                                        painter.rect_filled(tile_rect, 0.0, base_color);
-                                        // --- Highlight selected province/nation ---
-                                        if is_selected_prov {
-                                            painter.rect_stroke(
-                                                tile_rect,
-                                                0.0,
-                                                egui::Stroke::new(2.0, egui::Color32::from_rgb(0xFF, 0xFF, 0x00)),
-                                            );
-                                        } else if is_selected_nation {
-                                            painter.rect_stroke(
-                                                tile_rect,
-                                                0.0,
-                                                egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(0xFF, 0xFF, 0xFF, 0x60)),
-                                            );
-                                        }
-                                    }
-                                }
-                                // Province borders
-                                for y in vis_y0..vis_y1.min(map.height) {
-                                    for x in vis_x0..vis_x1.min(map.width) {
-                                        let raw = map.get(x, y);
-                                        let xf = origin.x + x as f32 * cell_size;
-                                        let yf = origin.y + y as f32 * cell_size;
-                                        if x + 1 < map.width && map.get(x + 1, y) != raw {
-                                            painter.line_segment(
-                                                [
-                                                    egui::Pos2::new(xf + cell_size, yf),
-                                                    egui::Pos2::new(xf + cell_size, yf + cell_size),
-                                                ],
-                                                province_border_stroke(),
-                                            );
-                                        }
-                                        if y + 1 < map.height && map.get(x, y + 1) != raw {
-                                            painter.line_segment(
-                                                [
-                                                    egui::Pos2::new(xf, yf + cell_size),
-                                                    egui::Pos2::new(xf + cell_size, yf + cell_size),
-                                                ],
-                                                province_border_stroke(),
-                                            );
-                                        }
-                                    }
-                                }
-                                // --- Province / nation name labels ---
-                                if show_names {
-                                    let mut centroids: std::collections::HashMap<u32, (f32, f32, u32, u32)> =
-                                        std::collections::HashMap::new();
-                                    for y in vis_y0..vis_y1.min(map.height) {
-                                        for x in vis_x0..vis_x1.min(map.width) {
-                                            let raw = map.get(x, y);
-                                            if raw == 0 { continue; }
-                                            let owner_raw = st
-                                                .get(ProvinceId(NonZeroU32::new(raw).unwrap()))
-                                                .and_then(|p| p.owner)
-                                                .map(|n| n.0.get())
-                                                .unwrap_or(0);
-                                            let e = centroids.entry(raw).or_insert((0.0, 0.0, 0, owner_raw));
-                                            e.0 += origin.x + (x as f32 + 0.5) * cell_size;
-                                            e.1 += origin.y + (y as f32 + 0.5) * cell_size;
-                                            e.2 += 1;
-                                        }
-                                    }
-                                    let font_size = (cell_size * 0.75).clamp(7.0, 18.0);
-                                    let font_id = egui::FontId::proportional(font_size);
-                                    for (prov_raw, (sum_x, sum_y, count, owner_raw)) in &centroids {
-                                        let cx = sum_x / *count as f32;
-                                        let cy = sum_y / *count as f32;
-                                        let label = if paint_ownership && *owner_raw != 0 {
-                                            format!("N{}", owner_raw)
-                                        } else {
-                                            format!("P{}", prov_raw)
-                                        };
-                                        let pos = egui::Pos2::new(cx, cy);
-                                        let galley = painter.layout_no_wrap(label, font_id.clone(), egui::Color32::WHITE);
-                                        let text_rect = egui::Rect::from_center_size(pos, galley.size());
-                                        painter.rect_filled(
-                                            text_rect.expand(2.0),
-                                            2.0,
-                                            egui::Color32::from_rgba_premultiplied(0, 0, 0, 160),
-                                        );
-                                        painter.galley(text_rect.min, galley, egui::Color32::WHITE);
-                                    }
-                                }
-                                // --- Cursor → tile mapping (zoom/pan aware) ---
-                                let to_tile = |pos: egui::Pos2| -> Option<(u32, u32)> {
-                                    let lx = (pos.x - origin.x) / cell_size;
-                                    let ly = (pos.y - origin.y) / cell_size;
-                                    if lx < 0.0 || ly < 0.0 { return None; }
-                                    let rx = lx as u32;
-                                    let ry = ly as u32;
-                                    (rx < map.width && ry < map.height).then_some((rx, ry))
-                                };
-                                // --- Hover tooltip ---
-                                let hover = response.hover_pos().and_then(|pos| {
-                                    let (rx, ry) = to_tile(pos)?;
-                                    let prov_raw = map.get(rx, ry);
-                                    let (owner, dev, terrain) = if prov_raw != 0 {
-                                        if let Some(p) = st.get(ProvinceId(NonZeroU32::new(prov_raw).unwrap())) {
-                                            (p.owner.map(|n| n.0.get()).unwrap_or(0), p.development, p.terrain)
-                                        } else {
-                                            (0, [0, 0, 0], 0)
-                                        }
-                                    } else {
-                                        (0, [0, 0, 0], 0)
-                                    };
-                                    Some(HoverInfo {
-                                        coords: format!("({}, {})", rx, ry),
-                                        province_raw: prov_raw,
-                                        owner_raw: owner,
-                                        dev,
-                                        terrain,
-                                    })
-                                });
-                                // --- Brush preview (draw cursor outline) ---
-                                if let Some(pos) = response.hover_pos() {
-                                    if let Some((cx, cy)) = to_tile(pos) {
-                                        let r = self.brush_radius as i32;
-                                        for dy in -r..=r {
-                                            for dx in -r..=r {
-                                                let tx = cx as i32 + dx;
-                                                let ty = cy as i32 + dy;
-                                                if tx >= 0 && ty >= 0 && (tx as u32) < map.width && (ty as u32) < map.height {
-                                                    let bx = origin.x + tx as f32 * cell_size;
-                                                    let by = origin.y + ty as f32 * cell_size;
-                                                    painter.rect_stroke(
-                                                        egui::Rect::from_min_size(
-                                                            egui::Pos2::new(bx, by),
-                                                            egui::Vec2::splat(cell_size),
-                                                        ),
-                                                        0.0,
-                                                        egui::Stroke::new(1.5, egui::Color32::from_rgba_premultiplied(0xFF, 0xFF, 0xFF, 0xAA)),
-                                                    );
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                // --- Primary click/drag → paint ---
-                                let primary_hit = (response.clicked() || response.dragged_by(egui::PointerButton::Primary))
-                                    .then(|| response.interact_pointer_pos())
-                                    .flatten()
-                                    .and_then(|pos| to_tile(pos).map(|(rx, ry)| TileHit::Square(rx, ry)));
-                                // --- Click-only hit (for ownership painting, avoids painting multiple provinces on drag) ---
-                                let click_only = response.clicked()
-                                    .then(|| response.interact_pointer_pos())
-                                    .flatten()
-                                    .and_then(|pos| to_tile(pos).map(|(rx, ry)| TileHit::Square(rx, ry)));
-                                // --- Secondary click/drag → erase ---
-                                let secondary_hit = (response.secondary_clicked() || response.dragged_by(egui::PointerButton::Secondary))
-                                    .then(|| response.interact_pointer_pos())
-                                    .flatten()
-                                    .and_then(|pos| to_tile(pos).map(|(rx, ry)| TileHit::Square(rx, ry)));
-                                (Some((map.width, map.height)), primary_hit, click_only, secondary_hit, hover)
-                            }
-                            MapKind::Hex(hex) => {
-                                let base_cell = 14.0_f32;
-                                let cell_size = base_cell * zoom;
-                                let w = hex.width;
-                                let h = hex.height;
-                                let hex_w = cell_size * 1.732;
-                                let hex_h = cell_size * 2.0;
-                                let total_w = w as f32 * hex_w * 0.75 + hex_w * 0.25;
-                                let total_h = h as f32 * hex_h * 0.5 + hex_h * 0.5;
-                                let (response, painter) = ui.allocate_painter(
-                                    ui.available_size().max(egui::Vec2::new(total_w, total_h)),
-                                    egui::Sense::click_and_drag(),
-                                );
-                                let rect = response.rect;
-
-                                // --- Zoom (scroll wheel) ---
-                                let scroll = ctx.input(|i| i.smooth_scroll_delta.y);
-                                if response.hovered() && scroll.abs() > 0.1 {
-                                    let factor = 1.0 + scroll * 0.002;
-                                    let new_zoom = (self.map_zoom * factor).clamp(0.25, 6.0);
-                                    if let Some(cursor) = response.hover_pos() {
-                                        let rel = cursor - rect.min - self.map_pan;
-                                        self.map_pan += rel * (1.0 - new_zoom / self.map_zoom);
-                                    }
-                                    self.map_zoom = new_zoom;
-                                }
-                                // --- Pan (middle-drag) ---
-                                if response.dragged_by(egui::PointerButton::Middle) {
-                                    self.map_pan += response.drag_delta();
-                                }
-
-                                let cell_size = base_cell * self.map_zoom;
-                                let hex_w = cell_size * 1.732;
-                                let hex_h = cell_size * 2.0;
-                                let origin = rect.min + self.map_pan;
-
-                                // Visible range culling: compute the range of hex rows/cols visible on screen
-                                let vis_q0 = ((rect.min.x - origin.x) / hex_w - 1.0).floor().max(0.0) as u32;
-                                let vis_q1 = (((rect.max.x - origin.x) / hex_w) + 2.0).ceil().max(0.0) as u32;
-                                let vis_r0 = ((rect.min.y - origin.y) / (hex_h * 0.5) - 1.0).floor().max(0.0) as u32;
-                                let vis_r1 = (((rect.max.y - origin.y) / (hex_h * 0.5)) + 2.0).ceil().max(0.0) as u32;
-
-                                for r in vis_r0..vis_r1.min(h) {
-                                    for q in vis_q0..vis_q1.min(w) {
-                                        let raw = hex.get(q, r);
-                                        let cx = origin.x + (q as f32 + 0.5 * (r % 2) as f32) * hex_w;
-                                        let cy = origin.y + (r as f32 + 0.5) * hex_h * 0.5;
-                                        let (owner_raw, is_selected_prov, is_selected_nation) = if raw == 0 {
-                                            (0u32, false, false)
-                                        } else {
-                                            let owner = st
-                                                .get(ProvinceId(NonZeroU32::new(raw).unwrap()))
-                                                .and_then(|p| p.owner)
-                                                .map(|n| n.0.get())
-                                                .unwrap_or(0);
-                                            let sp = self.selected_province == Some(raw);
-                                            let sn = owner != 0 && self.selected_nation == Some(owner);
-                                            (owner, sp, sn)
-                                        };
-                                        let base_color = if raw == 0 {
-                                            TILE_EMPTY_COLOR
-                                        } else if owner_raw == 0 {
-                                            TILE_UNOWNED_PROVINCE_COLOR
-                                        } else {
-                                            nation_color(owner_raw)
-                                        };
-                                        let mut points = Vec::with_capacity(6);
-                                        for i in 0..6 {
-                                            let a = std::f32::consts::FRAC_PI_3 * (i as f32);
-                                            points.push(egui::Pos2::new(
-                                                cx + cell_size * a.cos(),
-                                                cy + cell_size * a.sin(),
-                                            ));
-                                        }
-                                        let stroke = if is_selected_prov {
-                                            egui::Stroke::new(2.5, egui::Color32::from_rgb(0xFF, 0xFF, 0x00))
-                                        } else if is_selected_nation {
-                                            egui::Stroke::new(1.5, egui::Color32::from_rgba_premultiplied(0xFF, 0xFF, 0xFF, 0x60))
-                                        } else {
-                                            province_border_stroke()
-                                        };
-                                        painter.add(egui::Shape::convex_polygon(points, base_color, stroke));
-                                    }
-                                }
-                                // --- Province / nation name labels (hex) ---
-                                if show_names {
-                                    let mut centroids: std::collections::HashMap<u32, (f32, f32, u32, u32)> =
-                                        std::collections::HashMap::new();
-                                    for r in vis_r0..vis_r1.min(h) {
-                                        for q in vis_q0..vis_q1.min(w) {
-                                            let raw = hex.get(q, r);
-                                            if raw == 0 { continue; }
-                                            let owner_raw = st
-                                                .get(ProvinceId(NonZeroU32::new(raw).unwrap()))
-                                                .and_then(|p| p.owner)
-                                                .map(|n| n.0.get())
-                                                .unwrap_or(0);
-                                            let hx = origin.x + (q as f32 + 0.5 * (r % 2) as f32) * hex_w;
-                                            let hy = origin.y + (r as f32 + 0.5) * hex_h * 0.5;
-                                            let e = centroids.entry(raw).or_insert((0.0, 0.0, 0, owner_raw));
-                                            e.0 += hx;
-                                            e.1 += hy;
-                                            e.2 += 1;
-                                        }
-                                    }
-                                    let font_size = (cell_size * 0.75).clamp(7.0, 18.0);
-                                    let font_id = egui::FontId::proportional(font_size);
-                                    for (prov_raw, (sum_x, sum_y, count, owner_raw)) in &centroids {
-                                        let cx = sum_x / *count as f32;
-                                        let cy = sum_y / *count as f32;
-                                        let label = if paint_ownership && *owner_raw != 0 {
-                                            format!("N{}", owner_raw)
-                                        } else {
-                                            format!("P{}", prov_raw)
-                                        };
-                                        let pos = egui::Pos2::new(cx, cy);
-                                        let galley = painter.layout_no_wrap(label, font_id.clone(), egui::Color32::WHITE);
-                                        let text_rect = egui::Rect::from_center_size(pos, galley.size());
-                                        painter.rect_filled(
-                                            text_rect.expand(2.0),
-                                            2.0,
-                                            egui::Color32::from_rgba_premultiplied(0, 0, 0, 160),
-                                        );
-                                        painter.galley(text_rect.min, galley, egui::Color32::WHITE);
-                                    }
-                                }
-                                // --- Cursor → hex mapping ---
-                                let to_hex = |pos: egui::Pos2| -> Option<(u32, u32)> {
-                                    let px = (pos.x - origin.x) / hex_w;
-                                    let py = (pos.y - origin.y) / (hex_h * 0.5);
-                                    let r = (py - 0.5).floor();
-                                    if r < 0.0 { return None; }
-                                    let r = r as u32;
-                                    let q = (px - 0.5 * (r % 2) as f32).floor();
-                                    if q < 0.0 { return None; }
-                                    let q = q as u32;
-                                    (q < w && r < h).then_some((q, r))
-                                };
-                                // --- Hover tooltip ---
-                                let hover = response.hover_pos().and_then(|pos| {
-                                    let (hq, hr) = to_hex(pos)?;
-                                    let prov_raw = hex.get(hq, hr);
-                                    let (owner, dev, terrain) = if prov_raw != 0 {
-                                        if let Some(p) = st.get(ProvinceId(NonZeroU32::new(prov_raw).unwrap())) {
-                                            (p.owner.map(|n| n.0.get()).unwrap_or(0), p.development, p.terrain)
-                                        } else {
-                                            (0, [0, 0, 0], 0)
-                                        }
-                                    } else {
-                                        (0, [0, 0, 0], 0)
-                                    };
-                                    Some(HoverInfo {
-                                        coords: format!("({}, {})", hq, hr),
-                                        province_raw: prov_raw,
-                                        owner_raw: owner,
-                                        dev,
-                                        terrain,
-                                    })
-                                });
-                                let primary_hit = (response.clicked() || response.dragged_by(egui::PointerButton::Primary))
-                                    .then(|| response.interact_pointer_pos())
-                                    .flatten()
-                                    .and_then(|pos| to_hex(pos).map(|(q, r)| TileHit::Hex(q, r)));
-                                let click_only = response.clicked()
-                                    .then(|| response.interact_pointer_pos())
-                                    .flatten()
-                                    .and_then(|pos| to_hex(pos).map(|(q, r)| TileHit::Hex(q, r)));
-                                let secondary_hit = (response.secondary_clicked() || response.dragged_by(egui::PointerButton::Secondary))
-                                    .then(|| response.interact_pointer_pos())
-                                    .flatten()
-                                    .and_then(|pos| to_hex(pos).map(|(q, r)| TileHit::Hex(q, r)));
-                                (Some((w, h)), primary_hit, click_only, secondary_hit, hover)
-                            }
-                            MapKind::Irregular(vec) => {
-                                ui.label(format!(
-                                    "Irregular map: {} provinces. Use Assign (below) to set owners.",
-                                    vec.polygons.len()
-                                ));
-                                (None, None, None, None, None)
-                            }
-                        }
-                    } else {
-                        ui.label("No map. Create world with map_size(), map_hex(), or load a map.");
-                        (None, None, None, None, None)
-                    }
-                };
-
-                // --- Hover tooltip (non-blocking, near cursor) ---
-                if let Some(info) = hover_info {
-                    egui::show_tooltip_at_pointer(ctx, ui.layer_id(), egui::Id::new("map_hover_tip"), |ui| {
-                        ui.set_max_width(220.0);
-                        if info.province_raw == 0 {
-                            ui.label(format!("{} -- Empty tile", info.coords));
-                        } else {
-                            ui.label(format!("{} -- Province {}", info.coords, info.province_raw));
-                            let owner_text = if info.owner_raw == 0 { "Unowned".to_string() } else { format!("Nation {}", info.owner_raw) };
-                            ui.label(format!("Owner: {}", owner_text));
-                            let terrain_text = if info.terrain == 0 { "Land" } else { "Sea" };
-                            ui.label(format!("Terrain: {}  Dev: {}/{}/{}", terrain_text, info.dev[0], info.dev[1], info.dev[2]));
-                        }
-                    });
-                }
-
-                // --- Apply primary paint (with brush radius) ---
-                // In ownership mode use click-only to avoid painting multiple provinces on drag
-                let effective_hit = if paint_ownership { click_only_hit } else { tile_hit };
-                if let Some(hit) = effective_hit {
-                    if !self.stroke_undo_pushed {
-                        self.push_undo();
-                        self.stroke_undo_pushed = true;
-                    }
-                    let br = self.brush_radius as i32;
-                    match hit {
-                        TileHit::Square(rx, ry) => {
-                            if paint_ownership {
-                                if let Some(nid) = self.selected_nation {
-                                    for dy in -br..=br {
-                                        for dx in -br..=br {
-                                            let tx = rx as i32 + dx;
-                                            let ty = ry as i32 + dy;
-                                            if tx < 0 || ty < 0 { continue; }
-                                            let (tx, ty) = (tx as u32, ty as u32);
-                                            let raw = self.engine.world()
-                                                .get_resource::<MapKind>()
-                                                .and_then(|mk| match mk { MapKind::Square(m) => (tx < m.width && ty < m.height).then(|| m.get(tx, ty)), _ => None })
-                                                .unwrap_or(0);
-                                            if raw != 0 {
-                                                let world_mut = self.engine.world_mut();
-                                                let mut store = world_mut.get_resource_mut::<ProvinceStore>().unwrap();
-                                                let pid = ProvinceId(NonZeroU32::new(raw).unwrap());
-                                                let nation_id = NationId(NonZeroU32::new(nid).unwrap());
-                                                if let Some(p) = store.get_mut(pid) {
-                                                    p.owner = Some(nation_id);
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            } else {
-                                let selected_prov = self.selected_province.unwrap_or(1);
-                                for dy in -br..=br {
-                                    for dx in -br..=br {
-                                        let tx = rx as i32 + dx;
-                                        let ty = ry as i32 + dy;
-                                        if tx < 0 || ty < 0 { continue; }
-                                        let (tx, ty) = (tx as u32, ty as u32);
-                                        if let Some(mut mk) = self.engine.world_mut().get_resource_mut::<MapKind>() {
-                                            if let MapKind::Square(ref mut m) = *mk {
-                                                if tx < m.width && ty < m.height {
-                                                    m.set(tx, ty, selected_prov);
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        TileHit::Hex(q, r) => {
-                            if paint_ownership {
-                                if let Some(nid) = self.selected_nation {
-                                    // For hex, brush_radius 0 = single tile, otherwise apply to neighbors
-                                    let tiles = hex_brush_tiles(q, r, self.brush_radius,
-                                        self.engine.world().get_resource::<MapKind>()
-                                            .map(|mk| match mk { MapKind::Hex(m) => (m.width, m.height), _ => (0, 0) })
-                                            .unwrap_or((0, 0)));
-                                    for (hq, hr) in tiles {
-                                        let raw = self.engine.world()
-                                            .get_resource::<MapKind>()
-                                            .and_then(|mk| match mk { MapKind::Hex(m) => Some(m.get(hq, hr)), _ => None })
-                                            .unwrap_or(0);
-                                        if raw != 0 {
-                                            let world_mut = self.engine.world_mut();
-                                            let mut store = world_mut.get_resource_mut::<ProvinceStore>().unwrap();
-                                            let pid = ProvinceId(NonZeroU32::new(raw).unwrap());
-                                            let nation_id = NationId(NonZeroU32::new(nid).unwrap());
-                                            if let Some(p) = store.get_mut(pid) {
-                                                p.owner = Some(nation_id);
-                                            }
-                                        }
-                                    }
-                                }
-                            } else {
-                                let selected_prov = self.selected_province.unwrap_or(1);
-                                let tiles = hex_brush_tiles(q, r, self.brush_radius,
-                                    self.engine.world().get_resource::<MapKind>()
-                                        .map(|mk| match mk { MapKind::Hex(m) => (m.width, m.height), _ => (0, 0) })
-                                        .unwrap_or((0, 0)));
-                                for (hq, hr) in tiles {
-                                    if let Some(mut mk) = self.engine.world_mut().get_resource_mut::<MapKind>() {
-                                        if let MapKind::Hex(ref mut m) = *mk {
-                                            m.set(hq, hr, selected_prov);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // --- Apply erase (right-click): set tile to 0 (empty) ---
-                if let Some(hit) = erase_hit {
-                    if !self.stroke_undo_pushed {
-                        self.push_undo();
-                        self.stroke_undo_pushed = true;
-                    }
-                    let br = self.brush_radius as i32;
-                    match hit {
-                        TileHit::Square(rx, ry) => {
-                            for dy in -br..=br {
-                                for dx in -br..=br {
-                                    let tx = rx as i32 + dx;
-                                    let ty = ry as i32 + dy;
-                                    if tx < 0 || ty < 0 { continue; }
-                                    let (tx, ty) = (tx as u32, ty as u32);
-                                    if let Some(mut mk) = self.engine.world_mut().get_resource_mut::<MapKind>() {
-                                        if let MapKind::Square(ref mut m) = *mk {
-                                            if tx < m.width && ty < m.height {
-                                                m.set(tx, ty, 0);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        TileHit::Hex(q, r) => {
-                            let tiles = hex_brush_tiles(q, r, self.brush_radius,
-                                self.engine.world().get_resource::<MapKind>()
-                                    .map(|mk| match mk { MapKind::Hex(m) => (m.width, m.height), _ => (0, 0) })
-                                    .unwrap_or((0, 0)));
-                            for (hq, hr) in tiles {
-                                if let Some(mut mk) = self.engine.world_mut().get_resource_mut::<MapKind>() {
-                                    if let MapKind::Hex(ref mut m) = *mk {
-                                        m.set(hq, hr, 0);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if !paint_ownership || is_irregular {
-                    ui.add_space(12.0);
-                    ui.separator();
-                    ui.add_space(8.0);
-                    if let (Some(pid), Some(nid)) = (self.selected_province, self.selected_nation) {
-                        let assign_clicked = ui
-                            .button(egui::RichText::new("Assign province -> nation").color(egui::Color32::WHITE))
-                            .on_hover_text("Set the selected province's owner to the selected nation")
-                            .clicked();
-                        if assign_clicked {
-                            self.push_undo();
-                            let world = self.engine.world_mut();
-                            let Some(mut store) = world.get_resource_mut::<ProvinceStore>() else { return };
-                            let prov_id = ProvinceId(NonZeroU32::new(pid).unwrap());
-                            let nation_id = NationId(NonZeroU32::new(nid).unwrap());
-                            if let Some(p) = store.get_mut(prov_id) {
-                                p.owner = Some(nation_id);
-                            }
-                        }
-                    } else {
-                        ui.label(
-                            egui::RichText::new("Select a province (left) and a nation (right) to enable Assign.")
-                                .small()
-                                .color(ui.visuals().weak_text_color()),
-                        );
-                    }
-                }
-                ui.add_space(8.0);
-
-                // Pop-up events (optional).
-                {
-                    let world = self.engine.world_mut();
-                    pull_next_event(world);
-                    let inst = world
-                        .get_resource::<ActiveEvent>()
-                        .and_then(|a| a.current.clone());
-                    let def = inst
-                        .as_ref()
-                        .and_then(|i| world.get_resource::<EventRegistry>().and_then(|r| r.get(i.event_id)).cloned());
-                    let style = world
-                        .get_resource::<EventPopupStyle>()
-                        .cloned()
-                        .unwrap_or_default();
-                    let kw_reg = world
-                        .get_resource::<KeywordRegistry>()
-                        .cloned()
-                        .unwrap_or_default();
-
-                    if let (Some(inst), Some(def)) = (inst, def) {
-                        let mut chosen_next: Option<teleology_core::EventId> = None;
-                        let mut close = false;
-
-                        // Build styled frame
-                        let [br, bg, bb, ba] = style.bg_color;
-                        let frame = egui::Frame::none()
-                            .fill(egui::Color32::from_rgba_unmultiplied(br, bg, bb, ba))
-                            .inner_margin(egui::Margin::same(12.0))
-                            .rounding(6.0)
-                            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(
-                                br.saturating_add(40), bg.saturating_add(40), bb.saturating_add(40), ba,
-                            )));
-
-                        let mut win = egui::Window::new("")
-                            .title_bar(false)
-                            .collapsible(false)
-                            .resizable(false)
-                            .frame(frame);
-
-                        // Anchor / position
-                        match style.anchor {
-                            PopupAnchor::Center => {
-                                win = win.anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]);
-                            }
-                            PopupAnchor::Fixed { x, y } => {
-                                win = win.fixed_pos([x, y]);
-                            }
-                        }
-
-                        // Width
-                        if style.width > 0.0 {
-                            win = win.fixed_size([style.width, 0.0]);
-                        }
-
-                        win.show(ctx, |ui| {
-                            // Title
-                            let [tr, tg, tb, ta] = style.title_color;
-                            let title_size = if style.title_font_size > 0.0 { style.title_font_size } else { 18.0 };
-                            ui.label(
-                                egui::RichText::new(&def.title)
-                                    .font(egui::FontId::proportional(title_size))
-                                    .strong()
-                                    .color(egui::Color32::from_rgba_unmultiplied(tr, tg, tb, ta)),
-                            );
-                            ui.add_space(4.0);
-                            ui.separator();
-                            ui.add_space(4.0);
-
-                            // Image: per-event image overrides global style image
-                            let (img_path, img_w, img_h) = if !def.image.is_empty() {
-                                (def.image.as_str(), def.image_w, def.image_h)
-                            } else if !style.image_path.is_empty() {
-                                (style.image_path.as_str(), style.image_w, style.image_h)
-                            } else {
-                                ("", 0.0, 0.0)
-                            };
-                            if !img_path.is_empty() {
-                                let disp_w = if img_w > 0.0 { img_w } else { 200.0 };
-                                let disp_h = if img_h > 0.0 { img_h } else { 100.0 };
-                                let (r, _) = ui.allocate_exact_size(
-                                    egui::vec2(disp_w, disp_h),
-                                    egui::Sense::hover(),
-                                );
-                                // Try to load image texture
-                                if !self.project_thumbnails.contains_key(std::path::Path::new(img_path)) {
-                                    if let Some(tex) = load_image_texture(ctx, std::path::Path::new(img_path)) {
-                                        self.project_thumbnails.insert(std::path::PathBuf::from(img_path), tex);
-                                    }
-                                }
-                                if let Some(tex) = self.project_thumbnails.get(std::path::Path::new(img_path)) {
-                                    ui.painter().image(
-                                        tex.id(),
-                                        r,
-                                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                                        egui::Color32::WHITE,
-                                    );
-                                } else {
-                                    ui.painter().rect_filled(
-                                        r,
-                                        4.0,
-                                        egui::Color32::from_rgba_unmultiplied(60, 60, 80, 180),
-                                    );
-                                    ui.painter().text(
-                                        r.center(),
-                                        egui::Align2::CENTER_CENTER,
-                                        img_path,
-                                        egui::FontId::proportional(10.0),
-                                        egui::Color32::from_gray(140),
-                                    );
-                                }
-                                ui.add_space(6.0);
-                            }
-
-                            // Body (with keyword highlighting)
-                            let [dr, dg, db, da] = style.body_color;
-                            let body_size = if style.body_font_size > 0.0 { style.body_font_size } else { 14.0 };
-                            let body_color = egui::Color32::from_rgba_unmultiplied(dr, dg, db, da);
-                            let body_font = egui::FontId::proportional(body_size);
-                            render_keyword_text(
-                                ui,
-                                &def.body,
-                                body_font,
-                                body_color,
-                                &kw_reg,
-                                &mut self.project_thumbnails,
-                                ctx,
-                            );
-                            ui.add_space(10.0);
-
-                            // Choice buttons
-                            let [cr, cg, cb, _ca] = style.button_color;
-                            for ch in &def.choices {
-                                let btn = egui::Button::new(
-                                    egui::RichText::new(&ch.text)
-                                        .color(egui::Color32::from_rgb(cr, cg, cb)),
-                                );
-                                if ui.add_sized([ui.available_width(), 28.0], btn).clicked() {
-                                    close = true;
-                                    chosen_next = ch.next_event;
-                                }
-                                ui.add_space(2.0);
-                            }
-                        });
-
-                        if close {
-                            if let Some(mut active) = world.get_resource_mut::<ActiveEvent>() {
-                                active.current = None;
-                            }
-                            if let Some(next) = chosen_next {
-                                queue_event(world, next, inst.scope, inst.payload.clone());
-                            }
-                        }
-                    }
-                }
-            });
-    }
-
-    /// Unity-style hierarchy tree: Nation nodes with Province children, plus Unowned group.
-    fn ui_hierarchy_tree_panel(&mut self, ctx: &egui::Context) {
         self.process_pending_context_action();
-        egui::SidePanel::left("hierarchy")
-            .default_width(260.0)
-            .resizable(true)
-            .frame(panel_frame())
-            .show(ctx, |ui| {
-                panel_header(ui, "Hierarchy");
-                ui.add_space(4.0);
 
-                let paint_ownership = self.map_paint_mode == MapEditorPaintMode::PaintOwnership;
-                ui.label(
-                    egui::RichText::new(if paint_ownership {
-                        "Select a nation to paint ownership. Expand nodes to see provinces."
-                    } else {
-                        "Select a province to paint on the map."
-                    })
-                    .small()
-                    .color(ui.visuals().weak_text_color()),
-                );
-
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    if ui.button("+ Province").clicked() {
-                        self.push_undo();
-                        if let Some(new_id) = add_province_to_world(self.engine.world_mut()) {
-                            self.selected_province = Some(new_id);
-                        }
-                    }
-                    if ui.button("+ Nation").clicked() {
-                        if let Some(new_id) = add_nation_to_world(self.engine.world_mut()) {
-                            self.selected_nation = Some(new_id);
-                        }
-                    }
-                });
-
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    if ui.small_button("Expand all").clicked() {
-                        self.hierarchy_collapsed.clear();
-                    }
-                    if ui.small_button("Collapse all").clicked() {
-                        // Mark all as collapsed; we fill nation ids below.
-                        let world = self.engine.world();
-                        if let Some(b) = world.get_resource::<WorldBounds>() {
-                            self.hierarchy_collapsed.clear();
-                            for i in 0..=b.nation_count {
-                                self.hierarchy_collapsed.insert(i);
-                            }
-                        }
-                    }
-                });
-
-                ui.add_space(4.0);
-                ui.separator();
-                ui.add_space(4.0);
-
-                let world = self.engine.world();
-                let bounds = world.get_resource::<WorldBounds>();
-                let nations = world.get_resource::<NationStore>();
-                let provinces = world.get_resource::<ProvinceStore>();
-
-                if let (Some(bounds), Some(nations), Some(provinces)) = (bounds, nations, provinces) {
-                    let nation_count = bounds.nation_count as usize;
-                    let province_count = bounds.province_count as usize;
-
-                    // Build ownership map: nation_raw -> Vec<province_raw>
-                    let mut nation_provinces: Vec<Vec<u32>> = vec![Vec::new(); nation_count + 1];
-                    let mut unowned_provinces: Vec<u32> = Vec::new();
-
-                    for (i, p) in provinces.items.iter().enumerate().take(province_count) {
-                        let prov_raw = (i + 1) as u32;
-                        if let Some(owner) = p.owner {
-                            let n_raw = owner.0.get() as usize;
-                            if n_raw <= nation_count {
-                                nation_provinces[n_raw].push(prov_raw);
-                            } else {
-                                unowned_provinces.push(prov_raw);
-                            }
-                        } else {
-                            unowned_provinces.push(prov_raw);
-                        }
-                    }
-
-                    egui::ScrollArea::vertical()
-                        .auto_shrink([false; 2])
-                        .show(ui, |ui| {
-                            // --- Nation tree nodes ---
-                            for (i, n) in nations.items.iter().enumerate().take(nation_count) {
-                                let nation_raw = (i + 1) as u32;
-                                let children = &nation_provinces[nation_raw as usize];
-                                let is_open = !self.hierarchy_collapsed.contains(&nation_raw);
-                                let nation_selected = self.selected_nation == Some(nation_raw);
-
-                                let header_resp = ui.horizontal(|ui| {
-                                    // Collapse/expand triangle
-                                    let triangle = if children.is_empty() {
-                                        "  "
-                                    } else if is_open {
-                                        "\u{25BC}"
-                                    } else {
-                                        "\u{25B6}"
-                                    };
-                                    if !children.is_empty() {
-                                        if ui.add(
-                                            egui::Button::new(
-                                                egui::RichText::new(triangle).monospace().size(10.0),
-                                            )
-                                            .frame(false)
-                                            .min_size(egui::Vec2::new(16.0, 16.0)),
-                                        ).clicked() {
-                                            if is_open {
-                                                self.hierarchy_collapsed.insert(nation_raw);
-                                            } else {
-                                                self.hierarchy_collapsed.remove(&nation_raw);
-                                            }
-                                        }
-                                    } else {
-                                        ui.add_space(16.0);
-                                    }
-
-                                    // Color swatch
-                                    let (rect, _) = ui.allocate_exact_size(
-                                        egui::Vec2::new(12.0, 12.0),
-                                        egui::Sense::hover(),
-                                    );
-                                    ui.painter().rect_filled(rect, 2.0, nation_color(nation_raw));
-                                    ui.add_space(4.0);
-
-                                    // Nation label
-                                    let label = if children.is_empty() {
-                                        format!("Nation {}", nation_raw)
-                                    } else {
-                                        format!("Nation {} ({})", nation_raw, children.len())
-                                    };
-                                    ui.selectable_label(nation_selected, label)
-                                        .on_hover_text(format!(
-                                            "Prestige: {}  Stability: {}  Treasury: {}",
-                                            n.prestige, n.stability, n.treasury,
-                                        ))
-                                }).inner;
-
-                                if header_resp.clicked() {
-                                    self.selected_nation = Some(nation_raw);
-                                }
-                                header_resp.context_menu(|ui| {
-                                    ui.label("Nation actions:");
-                                    ui.separator();
-                                    if ui.button("Set tag\u{2026}").clicked() {
-                                        self.pending_context_action = Some(PendingContextAction::SetTag(ScopeKind::Nation, nation_raw));
-                                        ui.close_menu();
-                                    }
-                                    if ui.button("Add modifier\u{2026}").clicked() {
-                                        self.pending_context_action = Some(PendingContextAction::AddModifier(ScopeKind::Nation, nation_raw));
-                                        ui.close_menu();
-                                    }
-                                });
-
-                                // Province children (indented)
-                                if is_open && !children.is_empty() {
-                                    ui.indent(format!("nation_{}_children", nation_raw), |ui| {
-                                        for &prov_raw in children {
-                                            let prov_selected = self.selected_province == Some(prov_raw);
-                                            let p = &provinces.items[(prov_raw - 1) as usize];
-
-                                            let prov_resp = ui.horizontal(|ui| {
-                                                let (rect, _) = ui.allocate_exact_size(
-                                                    egui::Vec2::new(10.0, 10.0),
-                                                    egui::Sense::hover(),
-                                                );
-                                                ui.painter().rect_filled(rect, 1.0, nation_color(nation_raw));
-                                                ui.add_space(4.0);
-                                                ui.selectable_label(prov_selected, format!("Province {}", prov_raw))
-                                                    .on_hover_text(format!(
-                                                        "Owner: N{}  Dev: {}/{}/{}  {}",
-                                                        nation_raw,
-                                                        p.development[0], p.development[1], p.development[2],
-                                                        if p.terrain == 0 { "Land" } else { "Sea" },
-                                                    ))
-                                            }).inner;
-
-                                            if prov_resp.clicked() {
-                                                self.selected_province = Some(prov_raw);
-                                            }
-                                            province_context_menu(&prov_resp, prov_raw, &mut self.pending_context_action);
-                                        }
-                                    });
-                                }
-                                ui.add_space(1.0);
-                            }
-
-                            // --- Unowned provinces group ---
-                            if !unowned_provinces.is_empty() {
-                                ui.add_space(4.0);
-                                let unowned_open = !self.hierarchy_collapsed.contains(&0);
-
-                                ui.horizontal(|ui| {
-                                    let triangle = if unowned_open { "\u{25BC}" } else { "\u{25B6}" };
-                                    if ui.add(
-                                        egui::Button::new(
-                                            egui::RichText::new(triangle).monospace().size(10.0),
-                                        )
-                                        .frame(false)
-                                        .min_size(egui::Vec2::new(16.0, 16.0)),
-                                    ).clicked() {
-                                        if unowned_open {
-                                            self.hierarchy_collapsed.insert(0);
-                                        } else {
-                                            self.hierarchy_collapsed.remove(&0);
-                                        }
-                                    }
-                                    ui.add_space(4.0);
-                                    ui.label(
-                                        egui::RichText::new(format!("Unowned ({})", unowned_provinces.len()))
-                                            .italics()
-                                            .color(ui.visuals().weak_text_color()),
-                                    );
-                                });
-
-                                if unowned_open {
-                                    ui.indent("unowned_children", |ui| {
-                                        for &prov_raw in &unowned_provinces {
-                                            let prov_selected = self.selected_province == Some(prov_raw);
-                                            let p = &provinces.items[(prov_raw - 1) as usize];
-
-                                            let prov_resp = ui.horizontal(|ui| {
-                                                let (rect, _) = ui.allocate_exact_size(
-                                                    egui::Vec2::new(10.0, 10.0),
-                                                    egui::Sense::hover(),
-                                                );
-                                                ui.painter().rect_filled(rect, 1.0, TILE_UNOWNED_PROVINCE_COLOR);
-                                                ui.add_space(4.0);
-                                                ui.selectable_label(prov_selected, format!("Province {}", prov_raw))
-                                                    .on_hover_text(format!(
-                                                        "Unowned  Dev: {}/{}/{}  {}",
-                                                        p.development[0], p.development[1], p.development[2],
-                                                        if p.terrain == 0 { "Land" } else { "Sea" },
-                                                    ))
-                                            }).inner;
-
-                                            if prov_resp.clicked() {
-                                                self.selected_province = Some(prov_raw);
-                                            }
-                                            province_context_menu(&prov_resp, prov_raw, &mut self.pending_context_action);
-                                        }
-                                    });
-                                }
-                            }
-                        });
-                } else {
-                    ui.label("No world loaded.");
-                }
-                ui.add_space(8.0);
-            });
-    }
-
-    fn ui_map_editor_nations_panel_right(&mut self, ctx: &egui::Context) {
-        self.process_pending_context_action();
-        egui::SidePanel::right("inspector")
+        // Left panel: hierarchy tree
+        egui::SidePanel::left("map_editor_left")
             .default_width(220.0)
             .resizable(true)
-            .frame(panel_frame())
             .show(ctx, |ui| {
-                panel_header(ui, "Inspector");
-                ui.add_space(4.0);
-                ui.strong("Nations");
-                ui.add_space(2.0);
-                ui.label(
-                    egui::RichText::new("Select one, then use Assign (center) to set province owner.")
-                        .small()
-                        .color(ui.visuals().weak_text_color()),
+                panel_frame().show(ui, |ui| {
+                    self.ui_hierarchy_tree_panel(ui);
+                });
+            });
+
+        // Right panel: inspector
+        egui::SidePanel::right("map_editor_right")
+            .default_width(240.0)
+            .resizable(true)
+            .show(ctx, |ui| {
+                panel_frame().show(ui, |ui| {
+                    self.ui_map_inspector_panel(ui);
+                });
+            });
+
+        // Central panel: toolbar + map canvas
+        egui::CentralPanel::default().show(ctx, |ui| {
+            self.ui_map_toolbar(ui);
+            ui.separator();
+            self.ui_map_canvas(ui);
+        });
+
+        // Event popups (rendered on top of everything)
+        self.render_event_popups(ctx);
+    }
+
+    // -----------------------------------------------------------------------
+    // Toolbar
+    // -----------------------------------------------------------------------
+
+    fn ui_map_toolbar(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+
+            // Tool selector
+            ui.label(egui::RichText::new("Tool:").small().color(ui.visuals().weak_text_color()));
+            ui.selectable_value(&mut self.map_tool, MapTool::Brush, "Brush");
+            ui.selectable_value(&mut self.map_tool, MapTool::Fill, "Fill");
+            ui.selectable_value(&mut self.map_tool, MapTool::Erase, "Erase");
+            ui.selectable_value(&mut self.map_tool, MapTool::Eyedropper, "Pick");
+
+            ui.separator();
+
+            // Brush size
+            let label = match self.brush_radius {
+                0 => "1x1",
+                1 => "3x3",
+                2 => "5x5",
+                _ => "7x7",
+            };
+            ui.label(egui::RichText::new("Brush:").small().color(ui.visuals().weak_text_color()));
+            if ui.small_button(label).clicked() {
+                self.brush_radius = (self.brush_radius + 1) % 4;
+            }
+
+            ui.separator();
+
+            // View mode
+            ui.label(egui::RichText::new("View:").small().color(ui.visuals().weak_text_color()));
+            ui.selectable_value(&mut self.map_view_mode, MapViewMode::Terrain, "Terrain");
+            ui.selectable_value(&mut self.map_view_mode, MapViewMode::Province, "Province");
+            ui.selectable_value(&mut self.map_view_mode, MapViewMode::Political, "Political");
+
+            ui.separator();
+
+            // Zoom
+            ui.label(
+                egui::RichText::new(format!("{:.0}%", self.map_zoom * 100.0))
+                    .small()
+                    .color(ui.visuals().weak_text_color()),
+            );
+            if ui.small_button("Reset").clicked() {
+                self.map_zoom = 1.0;
+                self.map_pan = egui::Vec2::ZERO;
+            }
+
+            ui.separator();
+
+            // Names toggle
+            ui.checkbox(&mut self.show_map_names, "Names");
+        });
+
+        // Dynamic help text
+        ui.horizontal(|ui| {
+            let help = match (&self.map_tool, &self.map_view_mode) {
+                (MapTool::Brush, MapViewMode::Terrain) => "Click to paint terrain type on provinces",
+                (MapTool::Brush, MapViewMode::Province) => "Click to paint province tiles",
+                (MapTool::Brush, MapViewMode::Political) => "Click to paint nation ownership",
+                (MapTool::Fill, MapViewMode::Terrain) => "Click to flood-fill terrain on connected provinces",
+                (MapTool::Fill, MapViewMode::Province) => "Click to flood-fill province tiles",
+                (MapTool::Fill, MapViewMode::Political) => "Click to change all provinces of a nation",
+                (MapTool::Erase, MapViewMode::Terrain) => "Click to reset terrain to first type",
+                (MapTool::Erase, MapViewMode::Province) => "Click to clear tiles (set empty)",
+                (MapTool::Erase, MapViewMode::Political) => "Click to remove ownership",
+                (MapTool::Eyedropper, MapViewMode::Terrain) => "Click to pick terrain type",
+                (MapTool::Eyedropper, MapViewMode::Province) => "Click to pick province",
+                (MapTool::Eyedropper, MapViewMode::Political) => "Click to pick nation",
+            };
+            ui.label(egui::RichText::new(help).small().italics().color(ui.visuals().weak_text_color()));
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // Inspector (right panel)
+    // -----------------------------------------------------------------------
+
+    fn ui_map_inspector_panel(&mut self, ui: &mut egui::Ui) {
+        panel_header(ui, "Inspector");
+
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            // -- Terrain Palette (always shown in Terrain view) --
+            if self.map_view_mode == MapViewMode::Terrain {
+                ui.collapsing("Terrain Palette", |ui| {
+                    self.ui_terrain_palette(ui);
+                });
+                ui.add_space(6.0);
+            }
+
+            // -- Province Info (when a province is selected) --
+            if let Some(prov_raw) = self.selected_province {
+                ui.collapsing("Province Info", |ui| {
+                    self.ui_province_info(ui, prov_raw);
+                });
+                ui.add_space(6.0);
+            }
+
+            // -- Nation list (in Political view) --
+            if self.map_view_mode == MapViewMode::Political {
+                ui.collapsing("Nations", |ui| {
+                    self.ui_nation_list(ui);
+                });
+                ui.add_space(6.0);
+            }
+
+            // -- Auto-Generate --
+            ui.collapsing("Auto-Generate", |ui| {
+                self.ui_autogen_panel(ui);
+            });
+        });
+    }
+
+    fn ui_terrain_palette(&mut self, ui: &mut egui::Ui) {
+        let world = self.engine.world_mut();
+        let terrain_reg = world.get_resource::<TerrainRegistry>().cloned();
+        let Some(reg) = terrain_reg else {
+            ui.label("No terrain types defined. Create a world first.");
+            return;
+        };
+
+        let cols = 2;
+        egui::Grid::new("terrain_palette_grid")
+            .num_columns(cols)
+            .spacing([4.0, 4.0])
+            .show(ui, |ui| {
+                for (i, tt) in reg.types.iter().enumerate() {
+                    let selected = self.selected_terrain == tt.id;
+                    let color = terrain_egui_color(tt.color);
+                    // Color swatch + label
+                    let (rect, resp) = ui.allocate_exact_size(
+                        egui::vec2(ui.available_width().min(110.0), 22.0),
+                        egui::Sense::click(),
+                    );
+                    if resp.clicked() {
+                        self.selected_terrain = tt.id;
+                    }
+                    let fill = if selected { color } else { color.linear_multiply(0.6) };
+                    ui.painter().rect_filled(rect, 3.0, fill);
+                    if selected {
+                        ui.painter().rect_stroke(rect, 3.0, egui::Stroke::new(2.0, egui::Color32::WHITE));
+                    }
+                    ui.painter().text(
+                        rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        &tt.name,
+                        egui::FontId::proportional(11.0),
+                        if selected { egui::Color32::WHITE } else { egui::Color32::from_gray(220) },
+                    );
+                    if (i + 1) % cols == 0 {
+                        ui.end_row();
+                    }
+                }
+            });
+    }
+
+    fn ui_province_info(&mut self, ui: &mut egui::Ui, prov_raw: u32) {
+        let world = self.engine.world_mut();
+        let store = world.get_resource::<ProvinceStore>().cloned();
+        let terrain_reg = world.get_resource::<TerrainRegistry>().cloned();
+
+        if let Some(store) = &store {
+            let idx = (prov_raw - 1) as usize;
+            if let Some(p) = store.items.get(idx) {
+                ui.label(format!("Province #{}", prov_raw));
+                let tname = terrain_reg.as_ref().map(|r| r.name(p.terrain)).unwrap_or("?");
+                ui.label(format!("Terrain: {}", tname));
+                ui.label(format!("Dev: {} / {} / {}", p.development[0], p.development[1], p.development[2]));
+                ui.label(format!("Population: {}", p.population));
+                if let Some(owner) = p.owner {
+                    ui.label(format!("Owner: Nation #{}", owner.0.get()));
+                } else {
+                    ui.label("Owner: None");
+                }
+            }
+        }
+    }
+
+    fn ui_autogen_panel(&mut self, ui: &mut egui::Ui) {
+        ui.add(egui::DragValue::new(&mut self.autogen_province_count)
+            .range(2..=500)
+            .prefix("Provinces: "));
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new("Warning: replaces existing province assignments")
+                .small()
+                .color(egui::Color32::from_rgb(0xFF, 0xA0, 0x40)),
+        );
+        if ui.button("Generate").clicked() {
+            self.push_undo();
+            let count = self.autogen_province_count;
+            let world = self.engine.world_mut();
+            let mut bounds = match world.get_resource::<WorldBounds>().cloned() {
+                Some(b) => b,
+                None => return,
+            };
+            let mut store = match world.get_resource::<ProvinceStore>().cloned() {
+                Some(s) => s,
+                None => return,
+            };
+            let map_kind = match world.get_resource::<MapKind>().cloned() {
+                Some(m) => m,
+                None => return,
+            };
+
+            match map_kind {
+                MapKind::Square(mut layout) => {
+                    generate_provinces_square(&mut layout, count, &mut store, &mut bounds);
+                    world.insert_resource(MapKind::Square(layout));
+                }
+                MapKind::Hex(mut layout) => {
+                    generate_provinces_hex(&mut layout, count, &mut store, &mut bounds);
+                    world.insert_resource(MapKind::Hex(layout));
+                }
+                _ => {}
+            }
+            world.insert_resource(store);
+            world.insert_resource(bounds);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Map canvas (central panel)
+    // -----------------------------------------------------------------------
+
+    fn ui_map_canvas(&mut self, ui: &mut egui::Ui) {
+        let world = self.engine.world_mut();
+        let map_kind = world.get_resource::<MapKind>().cloned();
+        let bounds = world.get_resource::<WorldBounds>().cloned();
+
+        let Some(map_kind) = map_kind else {
+            ui.centered_and_justified(|ui| {
+                ui.label("No map loaded. Create a world from the World panel.");
+            });
+            return;
+        };
+        let Some(bounds) = bounds else { return };
+
+        match &map_kind {
+            MapKind::Square(layout) => {
+                self.render_square_map(ui, layout, &bounds);
+            }
+            MapKind::Hex(layout) => {
+                self.render_hex_map(ui, layout, &bounds);
+            }
+            MapKind::Irregular(_) => {
+                ui.label("Irregular maps use vector rendering (not yet implemented in reworked editor).");
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Square map rendering
+    // -----------------------------------------------------------------------
+
+    fn render_square_map(&mut self, ui: &mut egui::Ui, layout: &MapLayout, _bounds: &WorldBounds) {
+        let base_cell = 14.0_f32;
+        let cell_size = base_cell * self.map_zoom;
+        let (rect, response) = ui.allocate_at_least(ui.available_size(), egui::Sense::click_and_drag());
+        let painter = ui.painter_at(rect);
+
+        // Background
+        painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(0x1a, 0x1a, 0x2e));
+
+        // Zoom with scroll
+        let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+        if scroll != 0.0 && response.hovered() {
+            let factor = 1.0 + scroll * 0.002;
+            self.map_zoom = (self.map_zoom * factor).clamp(0.2, 10.0);
+        }
+
+        // Pan with middle mouse
+        if response.dragged_by(egui::PointerButton::Middle) {
+            self.map_pan += response.drag_delta();
+        }
+
+        let origin = rect.min.to_vec2() + self.map_pan;
+
+        // Read province and nation data
+        let world = self.engine.world_mut();
+        let provinces = world.get_resource::<ProvinceStore>().cloned().unwrap_or_else(|| ProvinceStore::new(0));
+        let nations = world.get_resource::<NationStore>().cloned().unwrap_or_else(|| NationStore::new(0));
+        let terrain_reg = world.get_resource::<TerrainRegistry>().cloned().unwrap_or_default();
+
+        // Visible range culling
+        let min_x = ((rect.min.x - origin.x) / cell_size).floor().max(0.0) as u32;
+        let min_y = ((rect.min.y - origin.y) / cell_size).floor().max(0.0) as u32;
+        let max_x = (((rect.max.x - origin.x) / cell_size).ceil() as u32).min(layout.width);
+        let max_y = (((rect.max.y - origin.y) / cell_size).ceil() as u32).min(layout.height);
+
+        // Tile rendering
+        for y in min_y..max_y {
+            for x in min_x..max_x {
+                let prov_raw = layout.get(x, y);
+                let tile_rect = egui::Rect::from_min_size(
+                    egui::Pos2::new(
+                        origin.x + x as f32 * cell_size,
+                        origin.y + y as f32 * cell_size,
+                    ),
+                    egui::vec2(cell_size, cell_size),
+                );
+
+                if !rect.intersects(tile_rect) {
+                    continue;
+                }
+
+                // Tile color based on view mode
+                let color = self.tile_color(prov_raw, &provinces, &nations, &terrain_reg);
+                painter.rect_filled(tile_rect, 0.0, color);
+
+                // Province borders
+                if x + 1 < layout.width && layout.get(x + 1, y) != prov_raw {
+                    painter.line_segment(
+                        [tile_rect.right_top(), tile_rect.right_bottom()],
+                        province_border_stroke(),
+                    );
+                }
+                if y + 1 < layout.height && layout.get(x, y + 1) != prov_raw {
+                    painter.line_segment(
+                        [tile_rect.left_bottom(), tile_rect.right_bottom()],
+                        province_border_stroke(),
+                    );
+                }
+
+                // Selected province highlight
+                if self.selected_province == Some(prov_raw) && prov_raw > 0 {
+                    painter.rect_stroke(
+                        tile_rect.shrink(0.5),
+                        0.0,
+                        egui::Stroke::new(1.5, egui::Color32::YELLOW),
+                    );
+                }
+            }
+        }
+
+        // Province name labels
+        if self.show_map_names && cell_size > 6.0 {
+            self.render_square_name_labels(&painter, layout, &provinces, origin, cell_size, rect);
+        }
+
+        // Hover tooltip + brush preview
+        if let Some(hover_pos) = response.hover_pos() {
+            let tx = ((hover_pos.x - origin.x) / cell_size).floor() as i32;
+            let ty = ((hover_pos.y - origin.y) / cell_size).floor() as i32;
+            if tx >= 0 && ty >= 0 && (tx as u32) < layout.width && (ty as u32) < layout.height {
+                let hx = tx as u32;
+                let hy = ty as u32;
+                let hprov = layout.get(hx, hy);
+
+                // Brush preview
+                let radius = self.brush_radius as i32;
+                for dy in -radius..=radius {
+                    for dx in -radius..=radius {
+                        let bx = tx + dx;
+                        let by = ty + dy;
+                        if bx >= 0 && by >= 0 && (bx as u32) < layout.width && (by as u32) < layout.height {
+                            let br = egui::Rect::from_min_size(
+                                egui::Pos2::new(
+                                    origin.x + bx as f32 * cell_size,
+                                    origin.y + by as f32 * cell_size,
+                                ),
+                                egui::vec2(cell_size, cell_size),
+                            );
+                            painter.rect_stroke(
+                                br,
+                                0.0,
+                                egui::Stroke::new(1.0, egui::Color32::from_white_alpha(120)),
+                            );
+                        }
+                    }
+                }
+
+                // Tooltip
+                egui::show_tooltip_at_pointer(ui.ctx(), ui.layer_id(), egui::Id::new("map_hover"), |ui| {
+                    ui.label(format!("Tile ({}, {})", hx, hy));
+                    if hprov > 0 {
+                        ui.label(format!("Province #{}", hprov));
+                        let idx = (hprov - 1) as usize;
+                        if let Some(p) = provinces.items.get(idx) {
+                            ui.label(format!("Terrain: {}", terrain_reg.name(p.terrain)));
+                            if let Some(owner) = p.owner {
+                                ui.label(format!("Owner: Nation #{}", owner.0.get()));
+                            }
+                        }
+                    } else {
+                        ui.label("Empty");
+                    }
+                });
+
+                // Handle clicks/drags (painting)
+                if response.clicked() || (response.dragged() && ui.input(|i| i.pointer.primary_down())) {
+                    self.handle_square_paint(hx, hy, layout);
+                }
+            }
+        }
+    }
+
+    fn tile_color(
+        &self,
+        prov_raw: u32,
+        provinces: &ProvinceStore,
+        _nations: &NationStore,
+        terrain_reg: &TerrainRegistry,
+    ) -> egui::Color32 {
+        if prov_raw == 0 {
+            return match self.map_view_mode {
+                MapViewMode::Terrain => egui::Color32::from_rgb(0x30, 0x30, 0x30),
+                MapViewMode::Province => egui::Color32::from_rgb(0x20, 0x20, 0x20),
+                MapViewMode::Political => TILE_EMPTY_COLOR,
+            };
+        }
+
+        let idx = (prov_raw - 1) as usize;
+        match self.map_view_mode {
+            MapViewMode::Terrain => {
+                if let Some(p) = provinces.items.get(idx) {
+                    terrain_egui_color(terrain_reg.color(p.terrain))
+                } else {
+                    egui::Color32::from_rgb(0x40, 0x40, 0x40)
+                }
+            }
+            MapViewMode::Province => province_color(prov_raw),
+            MapViewMode::Political => {
+                if let Some(p) = provinces.items.get(idx) {
+                    if let Some(owner) = p.owner {
+                        nation_color(owner.0.get())
+                    } else {
+                        TILE_UNOWNED_PROVINCE_COLOR
+                    }
+                } else {
+                    TILE_EMPTY_COLOR
+                }
+            }
+        }
+    }
+
+    fn render_square_name_labels(
+        &self,
+        painter: &egui::Painter,
+        layout: &MapLayout,
+        _provinces: &ProvinceStore,
+        origin: egui::Vec2,
+        cell_size: f32,
+        clip: egui::Rect,
+    ) {
+        // Find centroid of each province (average tile position)
+        let mut cx_sum: HashMap<u32, (f64, f64, u32)> = HashMap::new();
+        for y in 0..layout.height {
+            for x in 0..layout.width {
+                let p = layout.get(x, y);
+                if p > 0 {
+                    let e = cx_sum.entry(p).or_insert((0.0, 0.0, 0));
+                    e.0 += x as f64;
+                    e.1 += y as f64;
+                    e.2 += 1;
+                }
+            }
+        }
+
+        let font = egui::FontId::proportional((cell_size * 0.6).clamp(8.0, 14.0));
+        for (&prov_raw, &(sx, sy, count)) in &cx_sum {
+            let cx = sx / count as f64;
+            let cy = sy / count as f64;
+            let pos = egui::Pos2::new(
+                origin.x + (cx as f32 + 0.5) * cell_size,
+                origin.y + (cy as f32 + 0.5) * cell_size,
+            );
+            if !clip.contains(pos) {
+                continue;
+            }
+            let label = format!("P{}", prov_raw);
+            painter.text(
+                pos,
+                egui::Align2::CENTER_CENTER,
+                &label,
+                font.clone(),
+                egui::Color32::from_white_alpha(180),
+            );
+        }
+    }
+
+    fn handle_square_paint(&mut self, hx: u32, hy: u32, _layout: &MapLayout) {
+        // Push undo once per stroke
+        if !self.stroke_undo_pushed {
+            self.push_undo();
+            self.stroke_undo_pushed = true;
+        }
+
+        let world = self.engine.world_mut();
+        let radius = self.brush_radius as i32;
+
+        match (&self.map_tool, &self.map_view_mode) {
+            (MapTool::Brush, MapViewMode::Terrain) => {
+                // Paint terrain on the province under cursor
+                if let Some(map_kind) = world.get_resource::<MapKind>().cloned() {
+                    if let MapKind::Square(ref layout) = map_kind {
+                        let prov_raw = layout.get(hx, hy);
+                        if prov_raw > 0 {
+                            if let Some(mut store) = world.get_resource_mut::<ProvinceStore>() {
+                                let idx = (prov_raw - 1) as usize;
+                                if let Some(p) = store.items.get_mut(idx) {
+                                    p.terrain = self.selected_terrain;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            (MapTool::Brush, MapViewMode::Province) => {
+                // Paint province_id onto tiles
+                if let Some(sel) = self.selected_province {
+                    if let Some(mut mk) = world.get_resource_mut::<MapKind>() {
+                        if let MapKind::Square(ref mut layout) = *mk {
+                            for dy in -radius..=radius {
+                                for dx in -radius..=radius {
+                                    let nx = hx as i32 + dx;
+                                    let ny = hy as i32 + dy;
+                                    if nx >= 0 && ny >= 0 && (nx as u32) < layout.width && (ny as u32) < layout.height {
+                                        layout.set(nx as u32, ny as u32, sel);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            (MapTool::Brush, MapViewMode::Political) => {
+                // Paint nation ownership onto province under cursor
+                if let Some(sel_nation) = self.selected_nation {
+                    if let Some(map_kind) = world.get_resource::<MapKind>().cloned() {
+                        if let MapKind::Square(ref layout) = map_kind {
+                            let prov_raw = layout.get(hx, hy);
+                            if prov_raw > 0 {
+                                let nid = NonZeroU32::new(sel_nation).map(NationId);
+                                if let Some(mut store) = world.get_resource_mut::<ProvinceStore>() {
+                                    let idx = (prov_raw - 1) as usize;
+                                    if let Some(p) = store.items.get_mut(idx) {
+                                        p.owner = nid;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            (MapTool::Fill, MapViewMode::Terrain) => {
+                // Flood fill terrain on connected same-terrain provinces
+                if let Some(map_kind) = world.get_resource::<MapKind>().cloned() {
+                    if let MapKind::Square(ref layout) = map_kind {
+                        let prov_raw = layout.get(hx, hy);
+                        if prov_raw > 0 {
+                            if let Some(store) = world.get_resource::<ProvinceStore>().cloned() {
+                                let idx = (prov_raw - 1) as usize;
+                                if let Some(p) = store.items.get(idx) {
+                                    let old_terrain = p.terrain;
+                                    let new_terrain = self.selected_terrain;
+                                    if old_terrain != new_terrain {
+                                        let adj = find_connected_provinces_by_terrain(layout, prov_raw, old_terrain, &store);
+                                        if let Some(mut st) = world.get_resource_mut::<ProvinceStore>() {
+                                            for pr in adj {
+                                                let i = (pr - 1) as usize;
+                                                if let Some(pp) = st.items.get_mut(i) {
+                                                    pp.terrain = new_terrain;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            (MapTool::Fill, MapViewMode::Province) => {
+                // Flood fill tiles with selected province id
+                if let Some(sel) = self.selected_province {
+                    if let Some(mut mk) = world.get_resource_mut::<MapKind>() {
+                        if let MapKind::Square(ref mut layout) = *mk {
+                            let target = layout.get(hx, hy);
+                            if target != sel {
+                                let mut queue = VecDeque::new();
+                                queue.push_back((hx, hy));
+                                let mut visited = HashSet::new();
+                                visited.insert((hx, hy));
+                                while let Some((cx, cy)) = queue.pop_front() {
+                                    layout.set(cx, cy, sel);
+                                    for (dx, dy) in [(-1i32, 0), (1, 0), (0, -1), (0, 1)] {
+                                        let nx = cx as i32 + dx;
+                                        let ny = cy as i32 + dy;
+                                        if nx >= 0 && ny >= 0 && (nx as u32) < layout.width && (ny as u32) < layout.height {
+                                            let (nx, ny) = (nx as u32, ny as u32);
+                                            if !visited.contains(&(nx, ny)) && layout.get(nx, ny) == target {
+                                                visited.insert((nx, ny));
+                                                queue.push_back((nx, ny));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            (MapTool::Fill, MapViewMode::Political) => {
+                // Set all provinces of clicked nation to selected nation
+                if let Some(map_kind) = world.get_resource::<MapKind>().cloned() {
+                    if let MapKind::Square(ref layout) = map_kind {
+                        let prov_raw = layout.get(hx, hy);
+                        if prov_raw > 0 {
+                            if let Some(store) = world.get_resource::<ProvinceStore>().cloned() {
+                                let idx = (prov_raw - 1) as usize;
+                                if let Some(p) = store.items.get(idx) {
+                                    let old_owner = p.owner;
+                                    let new_owner = self.selected_nation.and_then(|n| NonZeroU32::new(n).map(NationId));
+                                    if old_owner != new_owner {
+                                        if let Some(mut st) = world.get_resource_mut::<ProvinceStore>() {
+                                            for pp in st.items.iter_mut() {
+                                                if pp.owner == old_owner {
+                                                    pp.owner = new_owner;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            (MapTool::Erase, MapViewMode::Terrain) => {
+                if let Some(map_kind) = world.get_resource::<MapKind>().cloned() {
+                    if let MapKind::Square(ref layout) = map_kind {
+                        let prov_raw = layout.get(hx, hy);
+                        if prov_raw > 0 {
+                            if let Some(mut store) = world.get_resource_mut::<ProvinceStore>() {
+                                let idx = (prov_raw - 1) as usize;
+                                if let Some(p) = store.items.get_mut(idx) {
+                                    p.terrain = 0;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            (MapTool::Erase, MapViewMode::Province) => {
+                if let Some(mut mk) = world.get_resource_mut::<MapKind>() {
+                    if let MapKind::Square(ref mut layout) = *mk {
+                        for dy in -radius..=radius {
+                            for dx in -radius..=radius {
+                                let nx = hx as i32 + dx;
+                                let ny = hy as i32 + dy;
+                                if nx >= 0 && ny >= 0 && (nx as u32) < layout.width && (ny as u32) < layout.height {
+                                    layout.set(nx as u32, ny as u32, 0);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            (MapTool::Erase, MapViewMode::Political) => {
+                if let Some(map_kind) = world.get_resource::<MapKind>().cloned() {
+                    if let MapKind::Square(ref layout) = map_kind {
+                        let prov_raw = layout.get(hx, hy);
+                        if prov_raw > 0 {
+                            if let Some(mut store) = world.get_resource_mut::<ProvinceStore>() {
+                                let idx = (prov_raw - 1) as usize;
+                                if let Some(p) = store.items.get_mut(idx) {
+                                    p.owner = None;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            (MapTool::Eyedropper, MapViewMode::Terrain) => {
+                if let Some(map_kind) = world.get_resource::<MapKind>().cloned() {
+                    if let MapKind::Square(ref layout) = map_kind {
+                        let prov_raw = layout.get(hx, hy);
+                        if prov_raw > 0 {
+                            if let Some(store) = world.get_resource::<ProvinceStore>() {
+                                let idx = (prov_raw - 1) as usize;
+                                if let Some(p) = store.items.get(idx) {
+                                    self.selected_terrain = p.terrain;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            (MapTool::Eyedropper, MapViewMode::Province) => {
+                if let Some(map_kind) = world.get_resource::<MapKind>().cloned() {
+                    if let MapKind::Square(ref layout) = map_kind {
+                        let prov_raw = layout.get(hx, hy);
+                        if prov_raw > 0 {
+                            self.selected_province = Some(prov_raw);
+                        }
+                    }
+                }
+            }
+            (MapTool::Eyedropper, MapViewMode::Political) => {
+                if let Some(map_kind) = world.get_resource::<MapKind>().cloned() {
+                    if let MapKind::Square(ref layout) = map_kind {
+                        let prov_raw = layout.get(hx, hy);
+                        if prov_raw > 0 {
+                            if let Some(store) = world.get_resource::<ProvinceStore>() {
+                                let idx = (prov_raw - 1) as usize;
+                                if let Some(p) = store.items.get(idx) {
+                                    self.selected_nation = p.owner.map(|n| n.0.get());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Hex map rendering
+    // -----------------------------------------------------------------------
+
+    fn render_hex_map(&mut self, ui: &mut egui::Ui, layout: &HexMapLayout, _bounds: &WorldBounds) {
+        let base_cell = 14.0_f32;
+        let cell_size = base_cell * self.map_zoom;
+        let hex_w = cell_size * 1.732;
+        let hex_h = cell_size * 2.0;
+
+        let (rect, response) = ui.allocate_at_least(ui.available_size(), egui::Sense::click_and_drag());
+        let painter = ui.painter_at(rect);
+
+        painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(0x1a, 0x1a, 0x2e));
+
+        // Zoom
+        let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+        if scroll != 0.0 && response.hovered() {
+            let factor = 1.0 + scroll * 0.002;
+            self.map_zoom = (self.map_zoom * factor).clamp(0.2, 10.0);
+        }
+
+        // Pan
+        if response.dragged_by(egui::PointerButton::Middle) {
+            self.map_pan += response.drag_delta();
+        }
+
+        let origin = rect.min.to_vec2() + self.map_pan;
+
+        let world = self.engine.world_mut();
+        let provinces = world.get_resource::<ProvinceStore>().cloned().unwrap_or_else(|| ProvinceStore::new(0));
+        let nations = world.get_resource::<NationStore>().cloned().unwrap_or_else(|| NationStore::new(0));
+        let terrain_reg = world.get_resource::<TerrainRegistry>().cloned().unwrap_or_default();
+
+        // Render hex tiles
+        for r in 0..layout.height {
+            for q in 0..layout.width {
+                let prov_raw = layout.get(q, r);
+                let (cx, cy) = hex_center(q, r, hex_w, hex_h, origin);
+                let center = egui::Pos2::new(cx, cy);
+
+                if !rect.expand(hex_w).contains(center) {
+                    continue;
+                }
+
+                let color = self.tile_color(prov_raw, &provinces, &nations, &terrain_reg);
+                let verts = hex_vertices(center, cell_size);
+                painter.add(egui::Shape::convex_polygon(
+                    verts.to_vec(),
+                    color,
+                    province_border_stroke(),
+                ));
+
+                // Selected highlight
+                if self.selected_province == Some(prov_raw) && prov_raw > 0 {
+                    let inner = hex_vertices(center, cell_size * 0.85);
+                    painter.add(egui::Shape::convex_polygon(
+                        inner.to_vec(),
+                        egui::Color32::TRANSPARENT,
+                        egui::Stroke::new(1.5, egui::Color32::YELLOW),
+                    ));
+                }
+            }
+        }
+
+        // Hover + painting for hex
+        if let Some(hover_pos) = response.hover_pos() {
+            if let Some((hq, hr)) = screen_to_hex(hover_pos, hex_w, hex_h, origin, layout.width, layout.height) {
+                let hprov = layout.get(hq, hr);
+
+                // Brush preview
+                let tiles = hex_brush_tiles(hq, hr, self.brush_radius, (layout.width, layout.height));
+                for (bq, br) in &tiles {
+                    let (bx, by) = hex_center(*bq, *br, hex_w, hex_h, origin);
+                    let bc = egui::Pos2::new(bx, by);
+                    let bv = hex_vertices(bc, cell_size * 0.9);
+                    painter.add(egui::Shape::convex_polygon(
+                        bv.to_vec(),
+                        egui::Color32::TRANSPARENT,
+                        egui::Stroke::new(1.0, egui::Color32::from_white_alpha(120)),
+                    ));
+                }
+
+                // Tooltip
+                egui::show_tooltip_at_pointer(ui.ctx(), ui.layer_id(), egui::Id::new("hex_hover"), |ui| {
+                    ui.label(format!("Hex ({}, {})", hq, hr));
+                    if hprov > 0 {
+                        ui.label(format!("Province #{}", hprov));
+                        let idx = (hprov - 1) as usize;
+                        if let Some(p) = provinces.items.get(idx) {
+                            ui.label(format!("Terrain: {}", terrain_reg.name(p.terrain)));
+                            if let Some(owner) = p.owner {
+                                ui.label(format!("Owner: Nation #{}", owner.0.get()));
+                            }
+                        }
+                    }
+                });
+
+                // Paint
+                if response.clicked() || (response.dragged() && ui.input(|i| i.pointer.primary_down())) {
+                    self.handle_hex_paint(hq, hr);
+                }
+            }
+        }
+    }
+
+    fn handle_hex_paint(&mut self, hq: u32, hr: u32) {
+        if !self.stroke_undo_pushed {
+            self.push_undo();
+            self.stroke_undo_pushed = true;
+        }
+
+        let world = self.engine.world_mut();
+        let radius = self.brush_radius;
+
+        match (&self.map_tool, &self.map_view_mode) {
+            (MapTool::Brush, MapViewMode::Terrain) => {
+                if let Some(map_kind) = world.get_resource::<MapKind>().cloned() {
+                    if let MapKind::Hex(ref layout) = map_kind {
+                        let prov_raw = layout.get(hq, hr);
+                        if prov_raw > 0 {
+                            if let Some(mut store) = world.get_resource_mut::<ProvinceStore>() {
+                                let idx = (prov_raw - 1) as usize;
+                                if let Some(p) = store.items.get_mut(idx) {
+                                    p.terrain = self.selected_terrain;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            (MapTool::Brush, MapViewMode::Province) => {
+                if let Some(sel) = self.selected_province {
+                    if let Some(mut mk) = world.get_resource_mut::<MapKind>() {
+                        if let MapKind::Hex(ref mut layout) = *mk {
+                            let tiles = hex_brush_tiles(hq, hr, radius, (layout.width, layout.height));
+                            for (tq, tr) in tiles {
+                                layout.set(tq, tr, sel);
+                            }
+                        }
+                    }
+                }
+            }
+            (MapTool::Brush, MapViewMode::Political) => {
+                if let Some(sel_nation) = self.selected_nation {
+                    if let Some(map_kind) = world.get_resource::<MapKind>().cloned() {
+                        if let MapKind::Hex(ref layout) = map_kind {
+                            let prov_raw = layout.get(hq, hr);
+                            if prov_raw > 0 {
+                                let nid = NonZeroU32::new(sel_nation).map(NationId);
+                                if let Some(mut store) = world.get_resource_mut::<ProvinceStore>() {
+                                    let idx = (prov_raw - 1) as usize;
+                                    if let Some(p) = store.items.get_mut(idx) {
+                                        p.owner = nid;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            (MapTool::Erase, MapViewMode::Province) => {
+                if let Some(mut mk) = world.get_resource_mut::<MapKind>() {
+                    if let MapKind::Hex(ref mut layout) = *mk {
+                        let tiles = hex_brush_tiles(hq, hr, radius, (layout.width, layout.height));
+                        for (tq, tr) in tiles {
+                            layout.set(tq, tr, 0);
+                        }
+                    }
+                }
+            }
+            (MapTool::Erase, MapViewMode::Terrain) => {
+                if let Some(map_kind) = world.get_resource::<MapKind>().cloned() {
+                    if let MapKind::Hex(ref layout) = map_kind {
+                        let prov_raw = layout.get(hq, hr);
+                        if prov_raw > 0 {
+                            if let Some(mut store) = world.get_resource_mut::<ProvinceStore>() {
+                                let idx = (prov_raw - 1) as usize;
+                                if let Some(p) = store.items.get_mut(idx) {
+                                    p.terrain = 0;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            (MapTool::Erase, MapViewMode::Political) => {
+                if let Some(map_kind) = world.get_resource::<MapKind>().cloned() {
+                    if let MapKind::Hex(ref layout) = map_kind {
+                        let prov_raw = layout.get(hq, hr);
+                        if prov_raw > 0 {
+                            if let Some(mut store) = world.get_resource_mut::<ProvinceStore>() {
+                                let idx = (prov_raw - 1) as usize;
+                                if let Some(p) = store.items.get_mut(idx) {
+                                    p.owner = None;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            (MapTool::Eyedropper, MapViewMode::Terrain) => {
+                if let Some(map_kind) = world.get_resource::<MapKind>().cloned() {
+                    if let MapKind::Hex(ref layout) = map_kind {
+                        let prov_raw = layout.get(hq, hr);
+                        if prov_raw > 0 {
+                            if let Some(store) = world.get_resource::<ProvinceStore>() {
+                                let idx = (prov_raw - 1) as usize;
+                                if let Some(p) = store.items.get(idx) {
+                                    self.selected_terrain = p.terrain;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            (MapTool::Eyedropper, MapViewMode::Province) => {
+                if let Some(map_kind) = world.get_resource::<MapKind>().cloned() {
+                    if let MapKind::Hex(ref layout) = map_kind {
+                        let prov_raw = layout.get(hq, hr);
+                        if prov_raw > 0 {
+                            self.selected_province = Some(prov_raw);
+                        }
+                    }
+                }
+            }
+            (MapTool::Eyedropper, MapViewMode::Political) => {
+                if let Some(map_kind) = world.get_resource::<MapKind>().cloned() {
+                    if let MapKind::Hex(ref layout) = map_kind {
+                        let prov_raw = layout.get(hq, hr);
+                        if prov_raw > 0 {
+                            if let Some(store) = world.get_resource::<ProvinceStore>() {
+                                let idx = (prov_raw - 1) as usize;
+                                if let Some(p) = store.items.get(idx) {
+                                    self.selected_nation = p.owner.map(|n| n.0.get());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {
+                // Fill for hex — mirrors square fill logic
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Event popups (preserved from previous implementation)
+    // -----------------------------------------------------------------------
+
+    fn render_event_popups(&mut self, ctx: &egui::Context) {
+        let world = self.engine.world_mut();
+        let active = match world.get_resource::<ActiveEvent>() {
+            Some(ae) => ae.clone(),
+            None => return,
+        };
+        let Some(inst) = &active.current else { return };
+        let event_registry = world.get_resource::<teleology_core::EventRegistry>().cloned();
+        let Some(reg) = event_registry else { return };
+        let Some(def) = reg.events.get(&inst.event_id.0.get()) else { return };
+
+        let keyword_registry = world
+            .get_resource::<teleology_core::KeywordRegistry>()
+            .cloned()
+            .unwrap_or_default();
+
+        let popup_style = world
+            .get_resource::<EventPopupStyle>()
+            .cloned()
+            .unwrap_or_default();
+
+        let window_id = egui::Id::new("event_popup");
+        let mut chosen: Option<usize> = None;
+
+        let width = if popup_style.width > 0.0 { popup_style.width } else { 360.0 };
+        let default_pos = match popup_style.anchor {
+            teleology_core::PopupAnchor::Center => {
+                let sr = ctx.screen_rect();
+                egui::Pos2::new(sr.center().x - width / 2.0, sr.center().y - 100.0)
+            }
+            teleology_core::PopupAnchor::Fixed { x, y } => egui::Pos2::new(x, y),
+        };
+
+        let bg = {
+            let c = popup_style.bg_color;
+            egui::Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3])
+        };
+        let title_color = {
+            let c = popup_style.title_color;
+            egui::Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3])
+        };
+        let body_color = {
+            let c = popup_style.body_color;
+            egui::Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3])
+        };
+
+        let frame = egui::Frame::default()
+            .fill(bg)
+            .inner_margin(egui::Margin::same(16.0))
+            .rounding(6.0)
+            .stroke(egui::Stroke::new(1.0, egui::Color32::from_gray(100)));
+
+        let title_font_size = if popup_style.title_font_size > 0.0 { popup_style.title_font_size } else { 18.0 };
+        let body_font_size = if popup_style.body_font_size > 0.0 { popup_style.body_font_size } else { 14.0 };
+
+        egui::Window::new(&def.title)
+            .id(window_id)
+            .default_pos(default_pos)
+            .default_width(width)
+            .resizable(false)
+            .collapsible(false)
+            .frame(frame)
+            .show(ctx, |ui| {
+                // Title
+                render_keyword_text(
+                    ui,
+                    &def.title,
+                    egui::FontId::proportional(title_font_size),
+                    title_color,
+                    &keyword_registry,
+                    &mut self.media_textures,
+                    ctx,
                 );
                 ui.add_space(8.0);
-                ui.separator();
-                ui.add_space(6.0);
-                let world = self.engine.world();
-                let (bounds, nations) = (
-                    world.get_resource::<WorldBounds>(),
-                    world.get_resource::<NationStore>(),
+                // Body
+                render_keyword_text(
+                    ui,
+                    &def.body,
+                    egui::FontId::proportional(body_font_size),
+                    body_color,
+                    &keyword_registry,
+                    &mut self.media_textures,
+                    ctx,
                 );
-                ui_nation_list(ui, bounds, nations, &mut self.selected_nation, &mut self.pending_context_action);
+                ui.add_space(12.0);
+                // Choices
+                for (i, choice) in def.choices.iter().enumerate() {
+                    if ui.button(&choice.text).clicked() {
+                        chosen = Some(i);
+                    }
+                }
             });
+
+        if let Some(idx) = chosen {
+            // Check if the chosen option chains to a next event
+            let next = def.choices.get(idx).and_then(|c| c.next_event);
+            let scope = inst.scope;
+            let world = self.engine.world_mut();
+            // Clear active event
+            if let Some(mut active) = world.get_resource_mut::<ActiveEvent>() {
+                active.current = None;
+            }
+            // Queue chained event if any
+            if let Some(next_id) = next {
+                if let Some(mut q) = world.get_resource_mut::<EventQueue>() {
+                    q.push(EventInstance {
+                        event_id: next_id,
+                        scope,
+                        payload: Vec::new(),
+                    });
+                }
+            }
+            // Pull next queued event
+            teleology_core::pull_next_event(world);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Hierarchy tree panel (left panel) — with drag-and-drop reparenting
+    // -----------------------------------------------------------------------
+
+    pub(crate) fn ui_hierarchy_tree_panel(&mut self, ui: &mut egui::Ui) {
+        panel_header(ui, "Hierarchy");
+
+        // Buttons: expand all / collapse all / + Province / + Nation
+        ui.horizontal(|ui| {
+            if ui.small_button("Expand").clicked() {
+                self.hierarchy_collapsed.clear();
+            }
+            if ui.small_button("Collapse").clicked() {
+                let world = self.engine.world_mut();
+                if let Some(b) = world.get_resource::<WorldBounds>() {
+                    self.hierarchy_collapsed.insert(0); // Unowned
+                    for i in 1..=b.nation_count {
+                        self.hierarchy_collapsed.insert(i);
+                    }
+                }
+            }
+            if ui.small_button("+ Province").clicked() {
+                self.push_undo();
+                let world = self.engine.world_mut();
+                if let Some(new_raw) = add_province_to_world(world) {
+                    self.selected_province = Some(new_raw);
+                }
+            }
+            if ui.small_button("+ Nation").clicked() {
+                let world = self.engine.world_mut();
+                if let Some(new_raw) = add_nation_to_world(world) {
+                    self.selected_nation = Some(new_raw);
+                }
+            }
+        });
+
+        ui.separator();
+
+        // Build ownership map
+        let world = self.engine.world_mut();
+        let bounds = world.get_resource::<WorldBounds>().cloned();
+        let store = world.get_resource::<ProvinceStore>().cloned();
+
+        let Some(bounds) = bounds else {
+            ui.label("No world loaded.");
+            return;
+        };
+        let Some(store) = store else { return };
+
+        let mut owned_by: HashMap<u32, Vec<u32>> = HashMap::new();
+        let mut unowned: Vec<u32> = Vec::new();
+        for (i, p) in store.items.iter().enumerate() {
+            let prov_raw = (i + 1) as u32;
+            if let Some(owner) = p.owner {
+                owned_by.entry(owner.0.get()).or_default().push(prov_raw);
+            } else {
+                unowned.push(prov_raw);
+            }
+        }
+
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            // Render nations
+            for n_raw in 1..=bounds.nation_count {
+                let collapsed = self.hierarchy_collapsed.contains(&n_raw);
+                let n_color = nation_color(n_raw);
+                let children = owned_by.get(&n_raw);
+                let child_count = children.map(|v| v.len()).unwrap_or(0);
+
+                // Nation row
+                ui.horizontal(|ui| {
+                    // Collapse triangle
+                    let tri = if collapsed { "\u{25B6}" } else { "\u{25BC}" };
+                    if ui.small_button(tri).clicked() {
+                        if collapsed {
+                            self.hierarchy_collapsed.remove(&n_raw);
+                        } else {
+                            self.hierarchy_collapsed.insert(n_raw);
+                        }
+                    }
+                    // Color swatch
+                    let (swatch_rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+                    ui.painter().rect_filled(swatch_rect, 2.0, n_color);
+                    // Label
+                    let label = format!("Nation #{} ({})", n_raw, child_count);
+                    let resp = ui.selectable_label(self.selected_nation == Some(n_raw), &label);
+                    if resp.clicked() {
+                        self.selected_nation = Some(n_raw);
+                    }
+
+                    // Drop target for drag-and-drop
+                    if self.hierarchy_drag_source.is_some() && resp.hovered() {
+                        self.hierarchy_drop_target = Some(n_raw);
+                        ui.painter().rect_stroke(
+                            resp.rect.expand(1.0),
+                            2.0,
+                            egui::Stroke::new(2.0, egui::Color32::from_rgb(0x40, 0x80, 0xFF)),
+                        );
+                    }
+
+                    // Context menu
+                    resp.context_menu(|ui| {
+                        if ui.button("Select Nation").clicked() {
+                            self.selected_nation = Some(n_raw);
+                            ui.close_menu();
+                        }
+                    });
+                });
+
+                // Children (provinces)
+                if !collapsed {
+                    if let Some(children) = children {
+                        for &prov_raw in children {
+                            self.render_province_row(ui, prov_raw, Some(n_raw));
+                        }
+                    }
+                }
+            }
+
+            // Unowned group
+            if !unowned.is_empty() {
+                let collapsed = self.hierarchy_collapsed.contains(&0);
+
+                ui.horizontal(|ui| {
+                    let tri = if collapsed { "\u{25B6}" } else { "\u{25BC}" };
+                    if ui.small_button(tri).clicked() {
+                        if collapsed {
+                            self.hierarchy_collapsed.remove(&0);
+                        } else {
+                            self.hierarchy_collapsed.insert(0);
+                        }
+                    }
+                    let label = format!("Unowned ({})", unowned.len());
+                    let resp = ui.selectable_label(false, &label);
+
+                    // Drop target: unown
+                    if self.hierarchy_drag_source.is_some() && resp.hovered() {
+                        self.hierarchy_drop_target = Some(0);
+                        ui.painter().rect_stroke(
+                            resp.rect.expand(1.0),
+                            2.0,
+                            egui::Stroke::new(2.0, egui::Color32::from_rgb(0x40, 0x80, 0xFF)),
+                        );
+                    }
+                });
+
+                if !collapsed {
+                    for &prov_raw in &unowned {
+                        self.render_province_row(ui, prov_raw, None);
+                    }
+                }
+            }
+
+            // Handle drop
+            if !ui.input(|i| i.pointer.primary_down()) {
+                if let Some(source) = self.hierarchy_drag_source.take() {
+                    if let Some(target_nation) = self.hierarchy_drop_target.take() {
+                        // Reparent province
+                        let new_owner = if target_nation == 0 {
+                            None
+                        } else {
+                            NonZeroU32::new(target_nation).map(NationId)
+                        };
+                        let world = self.engine.world_mut();
+                        if let Some(mut store) = world.get_resource_mut::<ProvinceStore>() {
+                            let idx = (source - 1) as usize;
+                            if let Some(p) = store.items.get_mut(idx) {
+                                p.owner = new_owner;
+                            }
+                        }
+                    }
+                }
+                self.hierarchy_drop_target = None;
+            }
+        });
+    }
+
+    fn render_province_row(&mut self, ui: &mut egui::Ui, prov_raw: u32, _parent_nation: Option<u32>) {
+        ui.horizontal(|ui| {
+            ui.add_space(20.0);
+
+            // Draggable province label
+            let label = format!("  P#{}", prov_raw);
+            let selected = self.selected_province == Some(prov_raw);
+            let resp = ui.add(
+                egui::Label::new(
+                    egui::RichText::new(&label)
+                        .color(if selected { egui::Color32::WHITE } else { egui::Color32::LIGHT_GRAY })
+                ).sense(egui::Sense::click_and_drag()),
+            );
+
+            if resp.clicked() {
+                self.selected_province = Some(prov_raw);
+            }
+
+            // Start drag
+            if resp.drag_started() {
+                self.hierarchy_drag_source = Some(prov_raw);
+            }
+
+            // Visual feedback while dragging this item
+            if self.hierarchy_drag_source == Some(prov_raw) && ui.input(|i| i.pointer.primary_down()) {
+                if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
+                    ui.painter().text(
+                        pos + egui::vec2(10.0, -10.0),
+                        egui::Align2::LEFT_CENTER,
+                        format!("P#{}", prov_raw),
+                        egui::FontId::proportional(11.0),
+                        egui::Color32::from_white_alpha(180),
+                    );
+                }
+            }
+
+            // Context menu
+            province_context_menu(ui, &resp, prov_raw, &mut self.pending_context_action);
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // Nation list (right panel, Political view)
+    // -----------------------------------------------------------------------
+
+    pub(crate) fn ui_nation_list(&mut self, ui: &mut egui::Ui) {
+        let world = self.engine.world_mut();
+        let bounds = world.get_resource::<WorldBounds>().cloned();
+
+        let Some(bounds) = bounds else {
+            ui.label("No world.");
+            return;
+        };
+
+        for n_raw in 1..=bounds.nation_count {
+            let color = nation_color(n_raw);
+            ui.horizontal(|ui| {
+                let (swatch, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+                ui.painter().rect_filled(swatch, 2.0, color);
+                let label = format!("Nation #{}", n_raw);
+                let resp = ui.selectable_label(self.selected_nation == Some(n_raw), &label);
+                if resp.clicked() {
+                    self.selected_nation = Some(n_raw);
+                }
+            });
+        }
+
+        ui.separator();
+        if ui.button("+ Nation").clicked() {
+            let world = self.engine.world_mut();
+            if let Some(new_raw) = add_nation_to_world(world) {
+                self.selected_nation = Some(new_raw);
+            }
+        }
     }
 }
 
-/// Right-click context menu for a province row (used in hierarchy tree and flat list).
+// ---------------------------------------------------------------------------
+// Province context menu (free function, shared by tree rows)
+// ---------------------------------------------------------------------------
+
 fn province_context_menu(
-    response: &egui::Response,
+    _ui: &mut egui::Ui,
+    resp: &egui::Response,
     prov_raw: u32,
-    pending_action: &mut Option<PendingContextAction>,
+    pending: &mut Option<PendingContextAction>,
 ) {
-    response.context_menu(|ui| {
-        ui.label("Province actions:");
-        ui.separator();
-        if ui.button("Set tag\u{2026}").clicked() {
-            *pending_action = Some(PendingContextAction::SetTag(ScopeKind::Province, prov_raw));
+    resp.context_menu(|ui| {
+        if ui.button("Set Tag...").clicked() {
+            *pending = Some(PendingContextAction::SetTag(ScopeKind::Province, prov_raw));
             ui.close_menu();
         }
-        if ui.button("Add modifier\u{2026}").clicked() {
-            *pending_action = Some(PendingContextAction::AddModifier(ScopeKind::Province, prov_raw));
+        if ui.button("Add Modifier...").clicked() {
+            *pending = Some(PendingContextAction::AddModifier(ScopeKind::Province, prov_raw));
             ui.close_menu();
         }
-        if ui.button("Fire event\u{2026}").clicked() {
-            *pending_action = Some(PendingContextAction::FireEventProvince(prov_raw));
+        if ui.button("Fire Event...").clicked() {
+            *pending = Some(PendingContextAction::FireEventProvince(prov_raw));
             ui.close_menu();
         }
-        if ui.button("Spawn army here").clicked() {
-            *pending_action = Some(PendingContextAction::SpawnArmyProvince(prov_raw));
+        if ui.button("Spawn Army").clicked() {
+            *pending = Some(PendingContextAction::SpawnArmyProvince(prov_raw));
             ui.close_menu();
         }
     });
 }
 
-/// Shared nation list rendering for left and right panels.
-fn ui_nation_list(
-    ui: &mut egui::Ui,
-    bounds: Option<&WorldBounds>,
-    nations: Option<&NationStore>,
-    selected_nation: &mut Option<u32>,
-    pending_action: &mut Option<PendingContextAction>,
-) {
-    if let (Some(bounds), Some(nations)) = (bounds, nations) {
-        egui::ScrollArea::vertical()
-            .auto_shrink([false; 2])
-            .show(ui, |ui| {
-                for (i, n) in nations.items.iter().enumerate().take(bounds.nation_count as usize) {
-                    let id = (i + 1) as u32;
-                    let selected = *selected_nation == Some(id);
-                    let label_response = ui.horizontal(|ui| {
-                        let (rect, _) = ui.allocate_exact_size(
-                            egui::Vec2::new(12.0, 12.0),
-                            egui::Sense::hover(),
-                        );
-                        ui.painter().rect_filled(rect, 2.0, nation_color(id));
-                        ui.add_space(6.0);
-                        ui.selectable_label(selected, format!("Nation {}", id))
-                            .on_hover_text(format!(
-                                "Prestige: {}  Stability: {}  Treasury: {}",
-                                n.prestige, n.stability, n.treasury,
-                            ))
-                    }).inner;
-                    if label_response.clicked() {
-                        *selected_nation = Some(id);
+// ---------------------------------------------------------------------------
+// Free functions: terrain flood fill helper
+// ---------------------------------------------------------------------------
+
+/// Find all provinces connected (via tile adjacency) to `start_prov` that share the same terrain.
+fn find_connected_provinces_by_terrain(
+    layout: &MapLayout,
+    start_prov: u32,
+    terrain: u8,
+    store: &ProvinceStore,
+) -> Vec<u32> {
+    let mut result = vec![start_prov];
+    let mut visited_provs: HashSet<u32> = HashSet::new();
+    visited_provs.insert(start_prov);
+    let mut queue: VecDeque<u32> = VecDeque::new();
+    queue.push_back(start_prov);
+
+    // Build adjacency from tile layout
+    let mut adj: HashMap<u32, HashSet<u32>> = HashMap::new();
+    for y in 0..layout.height {
+        for x in 0..layout.width {
+            let p = layout.get(x, y);
+            if p == 0 { continue; }
+            for (dx, dy) in [(-1i32, 0), (1, 0), (0, -1), (0, 1)] {
+                let nx = x as i32 + dx;
+                let ny = y as i32 + dy;
+                if nx >= 0 && ny >= 0 && (nx as u32) < layout.width && (ny as u32) < layout.height {
+                    let np = layout.get(nx as u32, ny as u32);
+                    if np != 0 && np != p {
+                        adj.entry(p).or_default().insert(np);
                     }
-                    label_response.context_menu(|ui| {
-                        ui.label("Nation actions (init on first use):");
-                        ui.separator();
-                        if ui.button("Set tag\u{2026}").clicked() {
-                            *pending_action = Some(PendingContextAction::SetTag(ScopeKind::Nation, id));
-                            ui.close_menu();
-                        }
-                        if ui.button("Add modifier\u{2026}").clicked() {
-                            *pending_action = Some(PendingContextAction::AddModifier(ScopeKind::Nation, id));
-                            ui.close_menu();
-                        }
-                    });
-                    ui.add_space(2.0);
                 }
-            });
-    } else {
-        ui.label("No world loaded.");
+            }
+        }
     }
-    ui.add_space(8.0);
+
+    while let Some(prov) = queue.pop_front() {
+        if let Some(neighbors) = adj.get(&prov) {
+            for &n in neighbors {
+                if !visited_provs.contains(&n) {
+                    let idx = (n - 1) as usize;
+                    if let Some(pp) = store.items.get(idx) {
+                        if pp.terrain == terrain {
+                            visited_provs.insert(n);
+                            result.push(n);
+                            queue.push_back(n);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    result
+}
+
+// ---------------------------------------------------------------------------
+// Hex geometry helpers
+// ---------------------------------------------------------------------------
+
+fn hex_center(q: u32, r: u32, hex_w: f32, hex_h: f32, origin: egui::Vec2) -> (f32, f32) {
+    let offset = if r % 2 == 1 { 0.5 } else { 0.0 };
+    let cx = origin.x + (q as f32 + offset) * hex_w + hex_w * 0.5;
+    let cy = origin.y + r as f32 * hex_h * 0.75 + hex_h * 0.5;
+    (cx, cy)
+}
+
+fn hex_vertices(center: egui::Pos2, size: f32) -> [egui::Pos2; 6] {
+    let mut verts = [egui::Pos2::ZERO; 6];
+    for i in 0..6 {
+        let angle = std::f32::consts::PI / 3.0 * i as f32 - std::f32::consts::PI / 6.0;
+        verts[i] = egui::Pos2::new(
+            center.x + size * angle.cos(),
+            center.y + size * angle.sin(),
+        );
+    }
+    verts
+}
+
+fn screen_to_hex(
+    pos: egui::Pos2,
+    hex_w: f32,
+    hex_h: f32,
+    origin: egui::Vec2,
+    width: u32,
+    height: u32,
+) -> Option<(u32, u32)> {
+    let ry = ((pos.y - origin.y - hex_h * 0.5) / (hex_h * 0.75)).round() as i32;
+    if ry < 0 || ry >= height as i32 {
+        return None;
+    }
+    let offset = if ry % 2 == 1 { 0.5 } else { 0.0 };
+    let rx = ((pos.x - origin.x - hex_w * 0.5) / hex_w - offset).round() as i32;
+    if rx < 0 || rx >= width as i32 {
+        return None;
+    }
+    Some((rx as u32, ry as u32))
 }

@@ -63,21 +63,32 @@ enum PendingContextAction {
     ClearNodePrereqs(u32, u32),   // (tree_raw, node_raw)
 }
 
-/// Map editor paint mode: paint by nation (ownership) or edit province layout.
+/// Map editor tool.
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
-pub enum MapEditorPaintMode {
-    /// Select a nation and paint on the map to set ownership. One step, intuitive.
+pub enum MapTool {
     #[default]
-    PaintOwnership,
-    /// Edit which province id is in each tile; then assign province → nation.
-    EditProvinces,
+    Brush,
+    Fill,
+    Erase,
+    Eyedropper,
+}
+
+/// Map editor view mode.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub enum MapViewMode {
+    #[default]
+    Terrain,
+    Province,
+    Political,
 }
 
 pub struct EditorApp {
     pub engine: EngineContext,
     pub mode: EditorMode,
-    /// Map editor: paint by nation (default) or edit province layout.
-    pub map_paint_mode: MapEditorPaintMode,
+    /// Active map tool (Brush, Fill, Erase, Eyedropper).
+    pub map_tool: MapTool,
+    /// Active map view mode (Terrain, Province, Political).
+    pub map_view_mode: MapViewMode,
     script_path_input: String,
     hot_reload: bool,
     selected_province: Option<u32>,
@@ -130,6 +141,18 @@ pub struct EditorApp {
     brush_radius: u32,
     /// Show province/nation name labels on the map.
     show_map_names: bool,
+    /// Selected terrain type for painting.
+    selected_terrain: u8,
+    /// Province auto-generation target count.
+    autogen_province_count: u32,
+    /// Whether auto-gen panel is open.
+    show_autogen_panel: bool,
+
+    // --- Hierarchy drag-and-drop ---
+    /// Province being dragged in hierarchy tree (raw id).
+    hierarchy_drag_source: Option<u32>,
+    /// Drop target: nation_raw (0 = Unowned) during drag.
+    hierarchy_drop_target: Option<u32>,
 
     // --- Media browser state ---
     /// Cached list of audio files in resources/audio/.
@@ -194,7 +217,8 @@ impl EditorApp {
         Self {
             engine,
             mode: EditorMode::default(),
-            map_paint_mode: MapEditorPaintMode::default(),
+            map_tool: MapTool::default(),
+            map_view_mode: MapViewMode::default(),
             script_path_input: String::new(),
             hot_reload: true,
             selected_province: None,
@@ -232,6 +256,11 @@ impl EditorApp {
             map_pan: egui::Vec2::ZERO,
             brush_radius: 0,
             show_map_names: false,
+            selected_terrain: 0,
+            autogen_province_count: 50,
+            show_autogen_panel: false,
+            hierarchy_drag_source: None,
+            hierarchy_drop_target: None,
             audio_files: scan_resource_dir("audio", &["mp3", "ogg", "wav", "flac", "aac"]),
             image_files: scan_resource_dir("assets", &["png", "jpg", "jpeg", "bmp", "webp"]),
             media_selected_audio: None,
@@ -292,22 +321,35 @@ impl eframe::App for EditorApp {
                 self.undo();
             }
         }
-        // Map editor shortcuts: Tab toggles paint mode, [ / ] change brush size
+        // Map editor shortcuts
         if self.mode == EditorMode::MapEditor {
+            // Tab cycles view mode
             if ctx.input(|i| i.key_pressed(egui::Key::Tab)) {
-                self.map_paint_mode = match self.map_paint_mode {
-                    MapEditorPaintMode::PaintOwnership => MapEditorPaintMode::EditProvinces,
-                    MapEditorPaintMode::EditProvinces => MapEditorPaintMode::PaintOwnership,
+                self.map_view_mode = match self.map_view_mode {
+                    MapViewMode::Terrain => MapViewMode::Province,
+                    MapViewMode::Province => MapViewMode::Political,
+                    MapViewMode::Political => MapViewMode::Terrain,
                 };
             }
+            // 1-4: select tool
+            if ctx.input(|i| i.key_pressed(egui::Key::Num1)) { self.map_tool = MapTool::Brush; }
+            if ctx.input(|i| i.key_pressed(egui::Key::Num2)) { self.map_tool = MapTool::Fill; }
+            if ctx.input(|i| i.key_pressed(egui::Key::Num3)) { self.map_tool = MapTool::Erase; }
+            if ctx.input(|i| i.key_pressed(egui::Key::Num4)) { self.map_tool = MapTool::Eyedropper; }
+            // [ ] brush size
             if ctx.input(|i| i.key_pressed(egui::Key::OpenBracket)) {
                 self.brush_radius = self.brush_radius.saturating_sub(1);
             }
             if ctx.input(|i| i.key_pressed(egui::Key::CloseBracket)) {
                 self.brush_radius = (self.brush_radius + 1).min(3);
             }
+            // N toggles names
             if ctx.input(|i| i.key_pressed(egui::Key::N)) {
                 self.show_map_names = !self.show_map_names;
+            }
+            // G toggles auto-gen panel
+            if ctx.input(|i| i.key_pressed(egui::Key::G)) {
+                self.show_autogen_panel = !self.show_autogen_panel;
             }
         }
 
