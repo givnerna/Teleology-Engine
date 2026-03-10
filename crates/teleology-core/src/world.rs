@@ -544,6 +544,7 @@ pub struct WorldBuilder {
     enable_diplomacy: bool,
     combat_model: Option<crate::combat::CombatModel>,
     enable_population: bool,
+    terrain_registry: Option<crate::archetypes::TerrainRegistry>,
 }
 
 impl WorldBuilder {
@@ -565,6 +566,7 @@ impl WorldBuilder {
             enable_diplomacy: false,
             combat_model: None,
             enable_population: false,
+            terrain_registry: None,
         }
     }
 
@@ -721,6 +723,12 @@ impl WorldBuilder {
         self
     }
 
+    /// Set custom terrain types. If not called, a default registry with Land+Sea is inserted.
+    pub fn terrain_registry(mut self, reg: crate::archetypes::TerrainRegistry) -> Self {
+        self.terrain_registry = Some(reg);
+        self
+    }
+
     pub fn build(self, world: &mut World) {
         world.insert_resource(WorldBounds {
             province_count: self.province_count,
@@ -736,6 +744,7 @@ impl WorldBuilder {
             world.insert_resource(mk);
         }
         world.insert_resource(ProvinceAdjacency::new(self.province_count as usize));
+        world.insert_resource(self.terrain_registry.unwrap_or_default());
 
         // Optional, modular systems.
         if self.enable_tags {
@@ -845,6 +854,209 @@ pub fn add_province_to_world(world: &mut World) -> Option<u32> {
     }
 
     Some(new_raw)
+}
+
+/// Add one new nation to an existing world (e.g. from the map editor).
+/// Extends WorldBounds, NationStore, and optionally NationModifiers, DiplomaticRelations, NationBudgets, and ProgressState.
+/// Returns the new nation raw id (1-based).
+pub fn add_nation_to_world(world: &mut World) -> Option<u32> {
+    let mut bounds = world.get_resource_mut::<WorldBounds>()?;
+    let new_raw = bounds.nation_count + 1;
+    bounds.nation_count = new_raw;
+
+    let mut store = world.get_resource_mut::<NationStore>()?;
+    store.push(Nation::default_for(NationId(
+        NonZeroU32::new(new_raw).unwrap(),
+    )));
+
+    if let Some(mut nm) = world.get_resource_mut::<crate::modifiers::NationModifiers>() {
+        nm.per_scope.push(Vec::new());
+    }
+    if let Some(mut nb) = world.get_resource_mut::<crate::economy::NationBudgets>() {
+        nb.budgets.push(crate::economy::BudgetEntry::default());
+    }
+    if let Some(mut ps) = world.get_resource_mut::<crate::progress_trees::ProgressState>() {
+        ps.per_nation.push(std::collections::HashMap::new());
+    }
+
+    Some(new_raw)
+}
+
+// ---------------------------------------------------------------------------
+// Province auto-generation (inspired by opengs-maptool's jittered seeds + BFS)
+// ---------------------------------------------------------------------------
+
+/// Simple LCG random number generator (no external dependency needed).
+struct SimpleRng(u64);
+
+impl SimpleRng {
+    fn new(seed: u64) -> Self {
+        Self(seed.wrapping_add(1))
+    }
+    fn next_u32(&mut self) -> u32 {
+        // LCG parameters from Numerical Recipes
+        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        (self.0 >> 33) as u32
+    }
+    /// Random u32 in [0, max).
+    fn next_range(&mut self, max: u32) -> u32 {
+        if max == 0 { return 0; }
+        self.next_u32() % max
+    }
+}
+
+/// Auto-generate provinces on a square map using jittered seeds + BFS flood fill.
+///
+/// Divides the map into a grid, places one seed per cell (jittered), then
+/// runs a multi-seed BFS so every tile is assigned to the nearest province.
+/// Clears and rebuilds `store` and updates `bounds.province_count`.
+pub fn generate_provinces_square(
+    map: &mut MapLayout,
+    count: u32,
+    store: &mut ProvinceStore,
+    bounds: &mut WorldBounds,
+) {
+    use std::collections::VecDeque;
+
+    let w = map.width;
+    let h = map.height;
+    if count == 0 || w == 0 || h == 0 {
+        return;
+    }
+
+    // 1. Jittered seeds: divide map into grid
+    let cols = ((count as f64).sqrt()).ceil() as u32;
+    let rows = ((count as f64 / cols as f64).ceil()) as u32;
+    let cell_w = w as f64 / cols as f64;
+    let cell_h = h as f64 / rows as f64;
+
+    let mut rng = SimpleRng::new(w as u64 * 31 + h as u64 * 17 + count as u64);
+    let mut seeds: Vec<(u32, u32)> = Vec::new();
+
+    for row in 0..rows {
+        for col in 0..cols {
+            if seeds.len() as u32 >= count {
+                break;
+            }
+            let cx = (col as f64 + 0.5) * cell_w;
+            let cy = (row as f64 + 0.5) * cell_h;
+            // Jitter within 60% of half-cell
+            let jx = (rng.next_range(1000) as f64 / 1000.0 - 0.5) * cell_w * 0.6;
+            let jy = (rng.next_range(1000) as f64 / 1000.0 - 0.5) * cell_h * 0.6;
+            let sx = ((cx + jx) as u32).min(w - 1);
+            let sy = ((cy + jy) as u32).min(h - 1);
+            seeds.push((sx, sy));
+        }
+    }
+
+    let actual_count = seeds.len() as u32;
+
+    // Clear map
+    for t in map.tiles.iter_mut() {
+        *t = 0;
+    }
+
+    // 2. Multi-seed BFS flood fill
+    let mut queue: VecDeque<(u32, u32, u32)> = VecDeque::new();
+    for (i, &(sx, sy)) in seeds.iter().enumerate() {
+        let prov_id = (i as u32) + 1;
+        map.set(sx, sy, prov_id);
+        queue.push_back((sx, sy, prov_id));
+    }
+
+    while let Some((x, y, prov_id)) = queue.pop_front() {
+        let neighbors: [(i32, i32); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
+        for (dx, dy) in neighbors {
+            let nx = x as i32 + dx;
+            let ny = y as i32 + dy;
+            if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 {
+                continue;
+            }
+            let (nx, ny) = (nx as u32, ny as u32);
+            if map.get(nx, ny) == 0 {
+                map.set(nx, ny, prov_id);
+                queue.push_back((nx, ny, prov_id));
+            }
+        }
+    }
+
+    // 3. Rebuild store
+    store.items.clear();
+    for i in 0..actual_count {
+        let id = ProvinceId(NonZeroU32::new(i + 1).unwrap());
+        store.items.push(Province::default_for(id));
+    }
+    bounds.province_count = actual_count;
+}
+
+/// Auto-generate provinces on a hex map using jittered seeds + BFS flood fill.
+///
+/// Same algorithm as square but uses 6-connected hex neighbors.
+pub fn generate_provinces_hex(
+    map: &mut HexMapLayout,
+    count: u32,
+    store: &mut ProvinceStore,
+    bounds: &mut WorldBounds,
+) {
+    use std::collections::VecDeque;
+
+    let w = map.width;
+    let h = map.height;
+    if count == 0 || w == 0 || h == 0 {
+        return;
+    }
+
+    let cols = ((count as f64).sqrt()).ceil() as u32;
+    let rows = ((count as f64 / cols as f64).ceil()) as u32;
+    let cell_w = w as f64 / cols as f64;
+    let cell_h = h as f64 / rows as f64;
+
+    let mut rng = SimpleRng::new(w as u64 * 31 + h as u64 * 17 + count as u64);
+    let mut seeds: Vec<(u32, u32)> = Vec::new();
+
+    for row in 0..rows {
+        for col in 0..cols {
+            if seeds.len() as u32 >= count {
+                break;
+            }
+            let cx = (col as f64 + 0.5) * cell_w;
+            let cy = (row as f64 + 0.5) * cell_h;
+            let jx = (rng.next_range(1000) as f64 / 1000.0 - 0.5) * cell_w * 0.6;
+            let jy = (rng.next_range(1000) as f64 / 1000.0 - 0.5) * cell_h * 0.6;
+            let sq = ((cx + jx) as u32).min(w - 1);
+            let sr = ((cy + jy) as u32).min(h - 1);
+            seeds.push((sq, sr));
+        }
+    }
+
+    let actual_count = seeds.len() as u32;
+
+    for t in map.tiles.iter_mut() {
+        *t = 0;
+    }
+
+    let mut queue: VecDeque<(u32, u32, u32)> = VecDeque::new();
+    for (i, &(sq, sr)) in seeds.iter().enumerate() {
+        let prov_id = (i as u32) + 1;
+        map.set(sq, sr, prov_id);
+        queue.push_back((sq, sr, prov_id));
+    }
+
+    while let Some((q, r, prov_id)) = queue.pop_front() {
+        for (nq, nr) in map.neighbors(q, r) {
+            if map.get(nq, nr) == 0 {
+                map.set(nq, nr, prov_id);
+                queue.push_back((nq, nr, prov_id));
+            }
+        }
+    }
+
+    store.items.clear();
+    for i in 0..actual_count {
+        let id = ProvinceId(NonZeroU32::new(i + 1).unwrap());
+        store.items.push(Province::default_for(id));
+    }
+    bounds.province_count = actual_count;
 }
 
 /// Convenience type for the full game world (ECS + resources).

@@ -3,6 +3,7 @@
 //! Data-oriented: fields are laid out for bulk access. Scripts (C++) read/write
 //! via the script API using indices/opaque handles.
 
+use bevy_ecs::prelude::Resource;
 use serde::{Deserialize, Serialize};
 
 use crate::world::{NationId, ProvinceId, ScopeId};
@@ -10,6 +11,64 @@ use crate::world::{NationId, ProvinceId, ScopeId};
 /// Terrain type for a province (Paradox-style: land vs sea).
 pub const TERRAIN_LAND: u8 = 0;
 pub const TERRAIN_SEA: u8 = 1;
+
+/// A terrain type definition. Developers register these to define their game's terrain palette.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TerrainType {
+    /// Terrain id (matches Province.terrain u8 value).
+    pub id: u8,
+    /// Display name (e.g. "Grassland", "Ocean", "Desert").
+    pub name: String,
+    /// Display color as [R, G, B, A].
+    pub color: [u8; 4],
+    /// Whether this terrain is passable by land units.
+    pub is_land: bool,
+}
+
+/// Registry of all terrain types. Stored as a Bevy Resource.
+/// Developers populate this via WorldBuilder or at runtime.
+/// Ships with two defaults: Land (0) and Sea (1).
+#[derive(Clone, Debug, Resource, Serialize, Deserialize)]
+pub struct TerrainRegistry {
+    pub types: Vec<TerrainType>,
+}
+
+impl Default for TerrainRegistry {
+    fn default() -> Self {
+        Self {
+            types: vec![
+                TerrainType { id: 0, name: "Land".into(), color: [0x22, 0x8B, 0x22, 0xFF], is_land: true },
+                TerrainType { id: 1, name: "Sea".into(), color: [0x1E, 0x3A, 0x5F, 0xFF], is_land: false },
+            ],
+        }
+    }
+}
+
+impl TerrainRegistry {
+    /// Look up a terrain type by id.
+    pub fn get(&self, id: u8) -> Option<&TerrainType> {
+        self.types.iter().find(|t| t.id == id)
+    }
+
+    /// Register a new terrain type (or replace existing with same id).
+    pub fn register(&mut self, t: TerrainType) {
+        if let Some(existing) = self.types.iter_mut().find(|e| e.id == t.id) {
+            *existing = t;
+        } else {
+            self.types.push(t);
+        }
+    }
+
+    /// Get display color for a terrain id. Returns dark gray if not found.
+    pub fn color(&self, id: u8) -> [u8; 4] {
+        self.get(id).map(|t| t.color).unwrap_or([0x40, 0x40, 0x40, 0xFF])
+    }
+
+    /// Get display name for a terrain id. Returns "Unknown" if not found.
+    pub fn name(&self, id: u8) -> &str {
+        self.get(id).map(|t| t.name.as_str()).unwrap_or("Unknown")
+    }
+}
 
 /// Shared interface for scope entities (Province, Nation) so generic stores
 /// and systems can construct and identify them without knowing concrete types.
@@ -151,5 +210,44 @@ mod tests {
         p.owner = Some(NationId::from_raw(1));
         p.occupation = Some(NationId::from_raw(2));
         assert_ne!(p.owner, p.occupation);
+    }
+
+    #[test]
+    fn terrain_registry_default() {
+        let reg = TerrainRegistry::default();
+        assert_eq!(reg.types.len(), 2);
+        assert_eq!(reg.name(0), "Land");
+        assert_eq!(reg.name(1), "Sea");
+        assert!(reg.get(0).unwrap().is_land);
+        assert!(!reg.get(1).unwrap().is_land);
+    }
+
+    #[test]
+    fn terrain_registry_register() {
+        let mut reg = TerrainRegistry::default();
+        reg.register(TerrainType {
+            id: 2,
+            name: "Desert".into(),
+            color: [0xED, 0xC9, 0x67, 0xFF],
+            is_land: true,
+        });
+        assert_eq!(reg.types.len(), 3);
+        assert_eq!(reg.name(2), "Desert");
+        // Replace existing
+        reg.register(TerrainType {
+            id: 0,
+            name: "Grassland".into(),
+            color: [0x32, 0xCD, 0x32, 0xFF],
+            is_land: true,
+        });
+        assert_eq!(reg.types.len(), 3);
+        assert_eq!(reg.name(0), "Grassland");
+    }
+
+    #[test]
+    fn terrain_registry_unknown() {
+        let reg = TerrainRegistry::default();
+        assert_eq!(reg.name(99), "Unknown");
+        assert_eq!(reg.color(99), [0x40, 0x40, 0x40, 0xFF]);
     }
 }

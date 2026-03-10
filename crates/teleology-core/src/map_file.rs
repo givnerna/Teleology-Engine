@@ -69,6 +69,8 @@ pub struct MapFile {
 
     pub population_config: Option<crate::population::PopulationConfig>,
     pub province_pops: Option<crate::population::ProvincePops>,
+
+    pub terrain_registry: Option<crate::archetypes::TerrainRegistry>,
 }
 
 impl MapFile {
@@ -164,6 +166,8 @@ impl MapFile {
         let population_config = world.get_resource::<crate::population::PopulationConfig>().cloned();
         let province_pops = world.get_resource::<crate::population::ProvincePops>().cloned();
 
+        let terrain_registry = world.get_resource::<crate::archetypes::TerrainRegistry>().cloned();
+
         Some(Self {
             version: MAP_FILE_VERSION,
             bounds,
@@ -200,6 +204,7 @@ impl MapFile {
             combat_result_log,
             population_config,
             province_pops,
+            terrain_registry,
         })
     }
 
@@ -317,6 +322,9 @@ impl MapFile {
         }
         if let Some(ref pp) = self.province_pops {
             world.insert_resource(pp.clone());
+        }
+        if let Some(ref tr) = self.terrain_registry {
+            world.insert_resource(tr.clone());
         }
 
         // Rebuild ECS entities for characters.

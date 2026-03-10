@@ -3,9 +3,9 @@ use std::num::NonZeroU32;
 use teleology_core::{
     ArmyComposition, ArmyRegistry, Army, CharacterGenConfig, EventBus,
     EventRegistry,
-    GameDate, GameTime, MapKind, NationId, NationTags,
-    ProgressTrees, ProvinceId, ProvinceModifiers, ProvinceTags,
-    TagId, TagRegistry, TagTypeId, TickUnit, TimeConfig, WorldBounds,
+    GameDate, GameTime, MapKind, NationId, NationStore, NationTags,
+    ProgressTrees, ProvinceId, ProvinceModifiers, ProvinceStore, ProvinceTags,
+    TagId, TagRegistry, TagTypeId, TickUnit, TimeConfig, WorldBounds, WorldBuilder,
     UiCommand, UiCommandBuffer, UiPrefabRegistry,
     queue_event, spawn_army,
 };
@@ -255,46 +255,191 @@ impl EditorApp {
             .show(ctx, |ui| {
                 panel_header(ui, "Scene");
                 ui.heading("World");
-            let world = self.engine.world();
-            let date = world.get_resource::<GameDate>().copied().unwrap_or_default();
-            let time = world.get_resource::<GameTime>().copied();
-            let tick_unit = world.get_resource::<TimeConfig>()
-                .map(|c| c.tick_unit).unwrap_or(TickUnit::Day);
-            let needs_time = matches!(tick_unit, TickUnit::Second | TickUnit::Minute | TickUnit::Hour);
-            if needs_time {
-                if let Some(t) = time {
-                    ui.label(format!("Date: {}-{:02}-{:02} {:02}:{:02}:{:02}  (tick {})", date.year, date.month, date.day, t.hour, t.minute, t.second, t.tick));
+                ui.add_space(4.0);
+
+                // --- Current world info ---
+                let world = self.engine.world();
+                let date = world.get_resource::<GameDate>().copied().unwrap_or_default();
+                let time = world.get_resource::<GameTime>().copied();
+                let tick_unit = world.get_resource::<TimeConfig>()
+                    .map(|c| c.tick_unit).unwrap_or(TickUnit::Day);
+                let needs_time = matches!(tick_unit, TickUnit::Second | TickUnit::Minute | TickUnit::Hour);
+                if needs_time {
+                    if let Some(t) = time {
+                        ui.label(format!("Date: {}-{:02}-{:02} {:02}:{:02}:{:02}  (tick {})", date.year, date.month, date.day, t.hour, t.minute, t.second, t.tick));
+                    } else {
+                        ui.label(format!("Date: {}-{:02}-{:02}", date.year, date.month, date.day));
+                    }
                 } else {
-                    ui.label(format!("Date: {}-{:02}-{:02}", date.year, date.month, date.day));
+                    if let Some(t) = time {
+                        ui.label(format!("Date: {}-{:02}-{:02}  (tick {})", date.year, date.month, date.day, t.tick));
+                    } else {
+                        ui.label(format!("Date: {}-{:02}-{:02}", date.year, date.month, date.day));
+                    }
                 }
-            } else {
-                if let Some(t) = time {
-                    ui.label(format!("Date: {}-{:02}-{:02}  (tick {})", date.year, date.month, date.day, t.tick));
-                } else {
-                    ui.label(format!("Date: {}-{:02}-{:02}", date.year, date.month, date.day));
+
+                let bounds = world.get_resource::<WorldBounds>().cloned();
+                let map_info = world.get_resource::<MapKind>().map(|mk| match mk {
+                    MapKind::Square(m) => format!("Square {}x{}", m.width, m.height),
+                    MapKind::Hex(m) => format!("Hex {}x{}", m.width, m.height),
+                    MapKind::Irregular(v) => format!("Irregular ({} polygons)", v.polygons.len()),
+                });
+
+                if let Some(b) = &bounds {
+                    ui.label(format!("Provinces: {}  Nations: {}", b.province_count, b.nation_count));
                 }
-            }
-            if let Some(bounds) = world.get_resource::<WorldBounds>() {
-                ui.label(format!("Provinces: {}", bounds.province_count));
-                ui.label(format!("Nations: {}", bounds.nation_count));
-            }
-            if let Some(mk) = world.get_resource::<MapKind>() {
-                match mk {
-                    MapKind::Square(m) => {
-                        ui.label(format!("Map: Square {}x{}", m.width, m.height));
+                if let Some(info) = &map_info {
+                    ui.label(format!("Map: {}", info));
+                }
+
+                // --- Hierarchy overview: nations with province counts ---
+                if let Some(b) = &bounds {
+                    let nations = world.get_resource::<NationStore>();
+                    let provinces = world.get_resource::<ProvinceStore>();
+                    if let (Some(nations), Some(provinces)) = (nations, provinces) {
+                        let nation_count = b.nation_count as usize;
+                        let province_count = b.province_count as usize;
+
+                        // Build ownership counts
+                        let mut owned_count = vec![0u32; nation_count + 1];
+                        let mut unowned = 0u32;
+                        for (_i, p) in provinces.items.iter().enumerate().take(province_count) {
+                            if let Some(owner) = p.owner {
+                                let n = owner.0.get() as usize;
+                                if n <= nation_count {
+                                    owned_count[n] += 1;
+                                } else {
+                                    unowned += 1;
+                                }
+                            } else {
+                                unowned += 1;
+                            }
+                        }
+
+                        ui.add_space(8.0);
+                        ui.separator();
+                        ui.add_space(4.0);
+                        ui.strong("Ownership Overview");
+                        ui.add_space(4.0);
+
+                        egui::Grid::new("ownership_overview")
+                            .striped(true)
+                            .min_col_width(60.0)
+                            .show(ui, |ui| {
+                                ui.label(egui::RichText::new("Nation").strong());
+                                ui.label(egui::RichText::new("Provinces").strong());
+                                ui.label(egui::RichText::new("Prestige").strong());
+                                ui.label(egui::RichText::new("Treasury").strong());
+                                ui.end_row();
+
+                                for (i, n) in nations.items.iter().enumerate().take(nation_count) {
+                                    let nation_raw = (i + 1) as u32;
+                                    let count = owned_count[nation_raw as usize];
+                                    ui.horizontal(|ui| {
+                                        let (rect, _) = ui.allocate_exact_size(
+                                            egui::Vec2::new(10.0, 10.0),
+                                            egui::Sense::hover(),
+                                        );
+                                        ui.painter().rect_filled(rect, 2.0, nation_color(nation_raw));
+                                        ui.add_space(4.0);
+                                        ui.label(format!("Nation {}", nation_raw));
+                                    });
+                                    ui.label(format!("{}", count));
+                                    ui.label(format!("{}", n.prestige));
+                                    ui.label(format!("{}", n.treasury));
+                                    ui.end_row();
+                                }
+
+                                if unowned > 0 {
+                                    ui.label(egui::RichText::new("Unowned").italics().color(ui.visuals().weak_text_color()));
+                                    ui.label(format!("{}", unowned));
+                                    ui.label("\u{2014}");
+                                    ui.label("\u{2014}");
+                                    ui.end_row();
+                                }
+                            });
                     }
-                    MapKind::Hex(m) => {
-                        ui.label(format!("Map: Hex {}x{}", m.width, m.height));
-                    }
-                    MapKind::Irregular(v) => {
-                        ui.label(format!("Map: Irregular ({} polygons)", v.polygons.len()));
-                    }
-                };
-            }
-            ui.add_space(16.0);
-            ui.label("Use Map Editor mode to paint provinces and load/save maps.");
-            ui.label("Use Run / Pause / Tick to advance the simulation.");
-        });
+                }
+
+                ui.add_space(12.0);
+                ui.separator();
+                ui.add_space(8.0);
+
+                // --- New World creation ---
+                ui.strong("Create New World");
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new("Replace the current world with a fresh one. This cannot be undone.")
+                        .small()
+                        .color(ui.visuals().weak_text_color()),
+                );
+                ui.add_space(6.0);
+
+                egui::Grid::new("new_world_form")
+                    .num_columns(2)
+                    .spacing([8.0, 4.0])
+                    .show(ui, |ui| {
+                        ui.label("Map type:");
+                        ui.horizontal(|ui| {
+                            ui.radio_value(&mut self.new_world_map_type, 0, "Square");
+                            ui.radio_value(&mut self.new_world_map_type, 1, "Hex");
+                        });
+                        ui.end_row();
+
+                        ui.label("Width:");
+                        ui.add(egui::DragValue::new(&mut self.new_world_map_width).range(2..=200).speed(1));
+                        ui.end_row();
+
+                        ui.label("Height:");
+                        ui.add(egui::DragValue::new(&mut self.new_world_map_height).range(2..=200).speed(1));
+                        ui.end_row();
+
+                        ui.label("Provinces:");
+                        ui.add(egui::DragValue::new(&mut self.new_world_province_count).range(1..=10000).speed(1));
+                        ui.end_row();
+
+                        ui.label("Nations:");
+                        ui.add(egui::DragValue::new(&mut self.new_world_nation_count).range(1..=1000).speed(1));
+                        ui.end_row();
+                    });
+
+                ui.add_space(6.0);
+                let total_tiles = self.new_world_map_width * self.new_world_map_height;
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{} tiles, {} provinces auto-distributed, {} nations",
+                        total_tiles, self.new_world_province_count, self.new_world_nation_count,
+                    ))
+                    .small()
+                    .color(ui.visuals().weak_text_color()),
+                );
+
+                ui.add_space(4.0);
+                if ui.button("Create World").clicked() {
+                    let world = self.engine.world_mut();
+                    let mut builder = WorldBuilder::new()
+                        .provinces(self.new_world_province_count)
+                        .nations(self.new_world_nation_count);
+                    builder = if self.new_world_map_type == 0 {
+                        builder.map_size(self.new_world_map_width, self.new_world_map_height)
+                    } else {
+                        builder.map_hex(self.new_world_map_width, self.new_world_map_height)
+                    };
+                    builder.build(world);
+                    self.selected_province = None;
+                    self.selected_nation = None;
+                    self.hierarchy_collapsed.clear();
+                    self.undo_history.clear();
+                    self.redo_history.clear();
+                }
+
+                ui.add_space(12.0);
+                ui.label(
+                    egui::RichText::new("Tip: Switch to Map Editor to paint provinces and assign ownership.")
+                        .small()
+                        .color(ui.visuals().weak_text_color()),
+                );
+            });
     }
 
     pub fn ui_settings(&mut self, ctx: &egui::Context) {

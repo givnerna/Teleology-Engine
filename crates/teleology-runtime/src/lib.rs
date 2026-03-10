@@ -13,6 +13,7 @@ mod c_api_diplomacy;
 mod c_api_economy;
 mod c_api_population;
 mod c_api_modifiers;
+mod c_api_world;
 
 use std::cell::UnsafeCell;
 use std::collections::HashSet;
