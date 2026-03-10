@@ -78,6 +78,63 @@ typedef struct TeleologyScriptApi {
 const TeleologyScriptApi* teleology_script_get_api(void);
 
 /* --- Engine provides (link against engine binary/dll) --- */
+
+/* ==========================================================================
+ * World creation / reset
+ * ==========================================================================
+ *
+ * Call teleology_world_reset() at the start of on_init() to configure your
+ * world. This replaces the default world with a fresh one of the requested
+ * size and geometry. All subsequent API calls operate on the new world.
+ *
+ * map_type: 0=Square (filled), 1=Square (empty), 2=Hex (filled),
+ *           3=Hex (empty), 4=Irregular/vector.
+ *
+ * Example:
+ *   void on_init(TeleologyEngine* engine) {
+ *       teleology_world_reset(engine, 200, 8, TELEOLOGY_MAP_HEX, 64, 48);
+ *       teleology_terrain_register(engine, 0, "Plains", 0x60, 0xA0, 0x40, 0xFF, 1);
+ *       teleology_terrain_register(engine, 1, "Ocean",  0x20, 0x40, 0xA0, 0xFF, 0);
+ *       teleology_generate_provinces(engine, 200);
+ *       teleology_set_start_date(engine, 1, 1, 1444);
+ *   }
+ */
+#define TELEOLOGY_MAP_SQUARE       0
+#define TELEOLOGY_MAP_SQUARE_EMPTY 1
+#define TELEOLOGY_MAP_HEX          2
+#define TELEOLOGY_MAP_HEX_EMPTY    3
+#define TELEOLOGY_MAP_IRREGULAR    4
+
+void         teleology_world_reset(TeleologyEngine* engine, uint32_t provinces, uint32_t nations, uint32_t map_type, uint32_t map_w, uint32_t map_h);
+
+/* --- Terrain registry ---
+ * Register terrain types so the engine and editor know about your game's terrain palette.
+ * is_land: 1=passable land, 0=water/impassable. */
+uint8_t      teleology_terrain_register(TeleologyEngine* engine, uint8_t id, const char* name, uint8_t r, uint8_t g, uint8_t b, uint8_t a, uint8_t is_land);
+uint32_t     teleology_terrain_count(TeleologyEngine* engine);
+uint32_t     teleology_terrain_get_name(TeleologyEngine* engine, uint8_t id, char* out, uint32_t out_cap);
+void         teleology_terrain_get_color(TeleologyEngine* engine, uint8_t id, uint8_t* r, uint8_t* g, uint8_t* b, uint8_t* a);
+uint8_t      teleology_terrain_is_land(TeleologyEngine* engine, uint8_t id);
+
+/* --- Province auto-generation (jittered BFS flood fill) ---
+ * Returns actual province count generated. Works for square and hex maps. */
+uint32_t     teleology_generate_provinces(TeleologyEngine* engine, uint32_t target_count);
+
+/* --- Map file save / load ---
+ * Binary format is compact; JSON is human-readable (useful for debugging/modding). */
+uint8_t      teleology_map_save(TeleologyEngine* engine, const char* path);
+uint8_t      teleology_map_load(TeleologyEngine* engine, const char* path);
+uint8_t      teleology_map_save_json(TeleologyEngine* engine, const char* path);
+uint8_t      teleology_map_load_json(TeleologyEngine* engine, const char* path);
+
+/* --- Time / date configuration --- */
+void         teleology_set_start_date(TeleologyEngine* engine, uint16_t day, uint8_t month, int32_t year);
+void         teleology_set_start_time(TeleologyEngine* engine, uint8_t second, uint8_t minute, uint8_t hour, uint16_t day, uint8_t month, int32_t year, uint64_t tick);
+
+/* ==========================================================================
+ * Core queries
+ * ========================================================================== */
+
 CGameDate    teleology_get_date(TeleologyEngine* engine);
 uint32_t     teleology_get_province_count(TeleologyEngine* engine);
 CNationId    teleology_get_province_owner(TeleologyEngine* engine, CProvinceId province);

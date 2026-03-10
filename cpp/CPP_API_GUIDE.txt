@@ -96,7 +96,88 @@ callback; only use it during the callback. The engine may change between
 loads (e.g. hot reload).
 
 --------------------------------------------------------------------------------
-5. ENGINE API (CALLING THE ENGINE FROM C++)
+5. WORLD CREATION (NO RUST REQUIRED)
+--------------------------------------------------------------------------------
+
+The engine starts with a default world (100 provinces, 20 nations, 20x10
+square map). You can replace it entirely from C++ by calling
+teleology_world_reset() as the first thing in on_init().
+
+  void teleology_world_reset(engine, provinces, nations, map_type, map_w, map_h);
+    Tear down the current world and rebuild with the given parameters.
+    map_type: TELEOLOGY_MAP_SQUARE       (0) — filled square grid
+              TELEOLOGY_MAP_SQUARE_EMPTY  (1) — empty square grid
+              TELEOLOGY_MAP_HEX           (2) — filled hex grid
+              TELEOLOGY_MAP_HEX_EMPTY     (3) — empty hex grid
+              TELEOLOGY_MAP_IRREGULAR     (4) — vector polygons (map_w/h ignored)
+
+  uint32_t teleology_generate_provinces(engine, target_count);
+    Auto-generate provinces using jittered-seed BFS flood fill. Works for
+    square and hex maps. Returns actual province count generated.
+
+  void teleology_set_start_date(engine, day, month, year);
+    Set the simulation start date (e.g. 1, 1, 1444 for Jan 1 1444).
+
+  void teleology_set_start_time(engine, second, minute, hour, day, month, year, tick);
+    Set the full game time with sub-day precision.
+
+Terrain types:
+
+  uint8_t teleology_terrain_register(engine, id, name, r, g, b, a, is_land);
+    Register a terrain type. The editor uses these for its terrain palette.
+    id: terrain index (0-255). name: display name. r/g/b/a: display color.
+    is_land: 1=passable land, 0=water/impassable.
+
+  uint32_t teleology_terrain_count(engine);
+  uint32_t teleology_terrain_get_name(engine, id, out, out_cap);
+  void     teleology_terrain_get_color(engine, id, &r, &g, &b, &a);
+  uint8_t  teleology_terrain_is_land(engine, id);
+
+Map file save/load:
+
+  uint8_t teleology_map_save(engine, path);       // binary (compact)
+  uint8_t teleology_map_load(engine, path);       // binary
+  uint8_t teleology_map_save_json(engine, path);  // JSON (human-readable)
+  uint8_t teleology_map_load_json(engine, path);  // JSON
+
+  Save/load the entire world state (provinces, nations, diplomacy, events,
+  economy, everything). Binary is smaller; JSON is useful for debugging and
+  modding. Returns 1 on success, 0 on failure.
+
+Example — complete world setup in C++:
+
+  void on_init(TeleologyEngine* engine) {
+      // Create a hex world: 300 provinces, 12 nations, 80x60 hex grid
+      teleology_world_reset(engine, 300, 12, TELEOLOGY_MAP_HEX, 80, 60);
+
+      // Define terrain types
+      teleology_terrain_register(engine, 0, "Plains",    0x60,0xA0,0x40,0xFF, 1);
+      teleology_terrain_register(engine, 1, "Ocean",     0x20,0x40,0xA0,0xFF, 0);
+      teleology_terrain_register(engine, 2, "Desert",    0xD0,0xC0,0x70,0xFF, 1);
+      teleology_terrain_register(engine, 3, "Mountains", 0x80,0x80,0x80,0xFF, 1);
+
+      // Auto-generate province shapes
+      teleology_generate_provinces(engine, 300);
+
+      // Set start date
+      teleology_set_start_date(engine, 1, 1, 1066);
+
+      // Configure combat, economy, nations...
+      teleology_combat_set_model(engine, 0);  // stack-based
+      for (uint32_t n = 1; n <= 12; n++) {
+          CNationId nation = { n };
+          teleology_set_nation_treasury(engine, nation, 500);
+      }
+  }
+
+Or load a pre-made map:
+
+  void on_init(TeleologyEngine* engine) {
+      teleology_map_load(engine, "maps/europe.tmap");
+  }
+
+--------------------------------------------------------------------------------
+6. ENGINE API (CALLING THE ENGINE FROM C++)
 --------------------------------------------------------------------------------
 
 All of these take TeleologyEngine* as the first argument. Pass the pointer
@@ -115,7 +196,7 @@ you receive in the current callback. Do not call these from other threads.
     Sets the owner of the province. Use nation.raw = 0 to set unowned.
 
 --------------------------------------------------------------------------------
-6. TYPES
+7. TYPES
 --------------------------------------------------------------------------------
 
 TeleologyEngine
@@ -135,7 +216,7 @@ CNationId
   (e.g. unowned province).
 
 --------------------------------------------------------------------------------
-7. PROVINCE & NATION FIELDS
+8. PROVINCE & NATION FIELDS
 --------------------------------------------------------------------------------
 
   uint8_t  teleology_get_province_terrain(engine, province);
@@ -173,7 +254,7 @@ CNationId
     Range: 0.0 (fresh) to 100.0 (exhausted).
 
 --------------------------------------------------------------------------------
-8. DIPLOMACY
+9. DIPLOMACY
 --------------------------------------------------------------------------------
 
 Relations (symmetric N×N matrix):
@@ -207,7 +288,7 @@ Alliances & truces:
   uint8_t  teleology_diplomacy_has_truce(engine, a, b);
 
 --------------------------------------------------------------------------------
-9. ECONOMY
+10. ECONOMY
 --------------------------------------------------------------------------------
 
 Budget queries (computed by simulation each secondary tick):
@@ -231,7 +312,7 @@ Goods:
   void     teleology_economy_set_province_trade_power(engine, province, value);
 
 --------------------------------------------------------------------------------
-10. POPULATION
+11. POPULATION
 --------------------------------------------------------------------------------
 
 Each province has zero or more pop groups, each with a culture, religion, size,
@@ -251,7 +332,7 @@ and unrest level. Culture/religion use TagId raws from the tag system.
     rebel army strengths to out arrays. Returns total revolt count (may exceed cap).
 
 --------------------------------------------------------------------------------
-11. MODIFIERS
+12. MODIFIERS
 --------------------------------------------------------------------------------
 
 Stackable effects on provinces and nations (e.g. +10% tax, -2 stability).
@@ -271,7 +352,7 @@ Stackable effects on provinces and nations (e.g. +10% tax, -2 stability).
     scope_kind: 0=Province, 1=Nation.
 
 --------------------------------------------------------------------------------
-12. CHARACTERS
+13. CHARACTERS
 --------------------------------------------------------------------------------
 
 Characters are leaders, generals, advisors, or custom roles. Identified by
@@ -296,7 +377,7 @@ persistent_id (unique across the game session).
   void     teleology_character_kill(engine, persistent_id, death_year);
 
 --------------------------------------------------------------------------------
-13. COMBAT
+14. COMBAT
 --------------------------------------------------------------------------------
 
 Combat model selection and unit type definitions. The engine handles battle
@@ -316,7 +397,7 @@ resolution internally; scripts configure and inspect results.
     Returns location province raw. winner_out: 0=Attacker, 1=Defender, 2=Draw.
 
 --------------------------------------------------------------------------------
-14. CONVENTIONS AND NOTES
+15. CONVENTIONS AND NOTES
 --------------------------------------------------------------------------------
 
 - IDs are 1-based. Province 1 is the first province, nation 1 is the first nation.
@@ -332,7 +413,7 @@ resolution internally; scripts configure and inspect results.
   combat) are lazy-initialized on first use. No setup required.
 
 --------------------------------------------------------------------------------
-15. MINIMAL EXAMPLE
+16. MINIMAL EXAMPLE
 --------------------------------------------------------------------------------
 
   #include "teleology.h"

@@ -15,20 +15,45 @@ static CNationId me  = { 1 };
 static CNationId rival = { 2 };
 
 static void on_init(TeleologyEngine* engine) {
+    // --- World creation (replaces the default world) ---
+    // 150 provinces, 6 nations, hex grid 60x40
+    teleology_world_reset(engine, 150, 6, TELEOLOGY_MAP_HEX, 60, 40);
+
+    // Define terrain types (editor uses these for map painting).
+    teleology_terrain_register(engine, 0, "Plains",    0x60,0xA0,0x40,0xFF, 1);
+    teleology_terrain_register(engine, 1, "Ocean",     0x20,0x40,0xA0,0xFF, 0);
+    teleology_terrain_register(engine, 2, "Desert",    0xD0,0xC0,0x70,0xFF, 1);
+    teleology_terrain_register(engine, 3, "Mountains", 0x80,0x80,0x80,0xFF, 1);
+    teleology_terrain_register(engine, 4, "Forest",    0x30,0x70,0x20,0xFF, 1);
+
+    // Auto-generate province shapes via BFS flood fill.
+    uint32_t actual = teleology_generate_provinces(engine, 150);
+    std::printf("[script] Generated %u provinces\n", actual);
+
+    // Set start date.
+    teleology_set_start_date(engine, 1, 1, 1066);
+
     std::printf("[script] on_init — provinces=%u, nations=%u\n",
         teleology_get_province_count(engine),
         teleology_get_nation_count(engine));
 
-    // Register unit types for the combat system.
+    // --- Combat & economy setup ---
     teleology_combat_set_model(engine, 0); // StackBased (Paradox-style)
     teleology_combat_register_unit_type(engine, "Infantry", 0, 10, 100, 1);
     teleology_combat_register_unit_type(engine, "Cavalry",  1, 15, 80,  3);
 
-    // Register a trade good.
     teleology_economy_register_good(engine, "Wheat", 2.0);
 
+    // --- Nation setup ---
+    for (uint32_t n = 1; n <= 6; n++) {
+        CNationId nation = { n };
+        teleology_set_nation_treasury(engine, nation, 500);
+        teleology_set_nation_stability(engine, nation, 1);
+        teleology_set_nation_manpower(engine, nation, 10000);
+    }
+
     // Spawn a ruler character.
-    uint64_t ruler = teleology_character_spawn(engine, 1, 1420);
+    uint64_t ruler = teleology_character_spawn(engine, 1, 1040);
     teleology_character_set_role(engine, ruler, 0, me, 0); // Leader
     teleology_character_set_stat(engine, ruler, 0, 6);     // military=6
     teleology_character_set_stat(engine, ruler, 1, 4);     // diplomacy=4
